@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 import json
+import os
 import random
+import sys
 from argparse import ArgumentParser
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 
@@ -17,6 +21,36 @@ except Exception as exc:
     raise RuntimeError("compute_tile_residual/compute_fw_score not available. Rebuild rasterizer.") from exc
 
 
+def _default_args():
+    default_parser = ArgumentParser(add_help=False)
+    ModelParams(default_parser)
+    PipelineParams(default_parser)
+    OptimizationParams(default_parser)
+    return default_parser.parse_args([])
+
+
+def _safe_get_args(parser: ArgumentParser):
+    args = parser.parse_args()
+    cfg_path = None
+    if hasattr(args, "model_path") and args.model_path:
+        cfg_path = os.path.join(args.model_path, "cfg_args")
+    if cfg_path and os.path.isfile(cfg_path):
+        return get_combined_args(parser)
+    defaults = _default_args()
+    for key, value in vars(defaults).items():
+        if hasattr(args, key) and getattr(args, key) is None:
+            setattr(args, key, value)
+    return args
+
+
+def _ensure_depths_available(dataset):
+    if getattr(dataset, "depths", ""):
+        depth_params = os.path.join(dataset.source_path, "sparse/0/depth_params.json")
+        if not os.path.isfile(depth_params):
+            print(f"Warning: depth_params.json not found at '{depth_params}'. Disabling depths.")
+            dataset.depths = ""
+
+
 def main():
     parser = ArgumentParser(description="Profile FW overhead")
     model = ModelParams(parser, sentinel=True)
@@ -26,13 +60,15 @@ def main():
     parser.add_argument("--iters", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=str, default=None)
-    args = get_combined_args(parser)
+    parser.add_argument("--quiet", action="store_true")
+    args = _safe_get_args(parser)
 
-    safe_state(True)
+    safe_state(args.quiet)
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
     dataset = model.extract(args)
+    _ensure_depths_available(dataset)
     pipe = pipeline.extract(args)
     opt_args = opt.extract(args)
 

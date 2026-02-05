@@ -3,7 +3,10 @@ import json
 import math
 import os
 import random
+import sys
 from argparse import ArgumentParser
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torchvision
@@ -43,6 +46,40 @@ def compute_fw_score_for_view(view, gaussians, pipe, opt, background):
     fw_score = compute_fw_score(tile_residual, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 0)
 
     return render_pkg, image.detach(), residual_img, fw_score
+
+
+def _default_args():
+    default_parser = ArgumentParser(add_help=False)
+    ModelParams(default_parser)
+    PipelineParams(default_parser)
+    OptimizationParams(default_parser)
+    return default_parser.parse_args([])
+
+
+def _safe_get_args(parser: ArgumentParser):
+    args = parser.parse_args()
+    cfg_path = None
+    if hasattr(args, "model_path") and args.model_path:
+        cfg_path = os.path.join(args.model_path, "cfg_args")
+    if cfg_path and os.path.isfile(cfg_path):
+        return get_combined_args(parser)
+    defaults = _default_args()
+    for key, value in vars(defaults).items():
+        if hasattr(args, key) and getattr(args, key) is None:
+            setattr(args, key, value)
+    return args
+
+
+def _ensure_depths_available(dataset):
+    depths = getattr(dataset, "depths", "")
+    if depths is None:
+        dataset.depths = ""
+        return
+    if depths != "":
+        depth_params = os.path.join(dataset.source_path, "sparse/0/depth_params.json")
+        if not os.path.isfile(depth_params):
+            print(f"Warning: depth_params.json not found at '{depth_params}'. Disabling depths.")
+            dataset.depths = ""
 
 
 def score_heatmap_sanity(scene, pipe, opt, background, topk, out_dir):
@@ -188,13 +225,15 @@ def main():
     parser.add_argument("--topk", type=int, default=500)
     parser.add_argument("--out_dir", type=str, default="./output/fw_minimal")
     parser.add_argument("--steps", type=int, default=60)
-    args = get_combined_args(parser)
+    parser.add_argument("--quiet", action="store_true")
+    args = _safe_get_args(parser)
 
-    safe_state(True)
+    safe_state(args.quiet)
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
     dataset = model.extract(args)
+    _ensure_depths_available(dataset)
     pipe = pipeline.extract(args)
     opt_args = opt.extract(args)
 

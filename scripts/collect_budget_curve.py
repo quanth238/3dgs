@@ -1,16 +1,50 @@
 #!/usr/bin/env python3
 import json
+import os
+import sys
 from argparse import ArgumentParser
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 
-from arguments import ModelParams, PipelineParams, get_combined_args
+from arguments import ModelParams, PipelineParams, OptimizationParams, get_combined_args
 from scene import Scene
 from gaussian_renderer import render, GaussianModel
 from utils.loss_utils import ssim
 from utils.image_utils import psnr
 from lpipsPyTorch import lpips
 from utils.general_utils import safe_state
+
+
+def _default_args():
+    default_parser = ArgumentParser(add_help=False)
+    ModelParams(default_parser)
+    PipelineParams(default_parser)
+    OptimizationParams(default_parser)
+    return default_parser.parse_args([])
+
+
+def _safe_get_args(parser: ArgumentParser):
+    args = parser.parse_args()
+    cfg_path = None
+    if hasattr(args, "model_path") and args.model_path:
+        cfg_path = os.path.join(args.model_path, "cfg_args")
+    if cfg_path and os.path.isfile(cfg_path):
+        return get_combined_args(parser)
+    defaults = _default_args()
+    for key, value in vars(defaults).items():
+        if hasattr(args, key) and getattr(args, key) is None:
+            setattr(args, key, value)
+    return args
+
+
+def _ensure_depths_available(dataset):
+    if getattr(dataset, "depths", ""):
+        depth_params = os.path.join(dataset.source_path, "sparse/0/depth_params.json")
+        if not os.path.isfile(depth_params):
+            print(f"Warning: depth_params.json not found at '{depth_params}'. Disabling depths.")
+            dataset.depths = ""
 
 
 def eval_iteration(dataset, pipe, iteration, max_views=None):
@@ -50,10 +84,12 @@ def main():
     parser.add_argument("--iterations", nargs="+", type=int, required=True)
     parser.add_argument("--max_views", type=int, default=None)
     parser.add_argument("--out", type=str, default=None)
-    args = get_combined_args(parser)
+    parser.add_argument("--quiet", action="store_true")
+    args = _safe_get_args(parser)
 
-    safe_state(True)
+    safe_state(args.quiet)
     dataset = model.extract(args)
+    _ensure_depths_available(dataset)
     pipe = pipeline.extract(args)
 
     results = []

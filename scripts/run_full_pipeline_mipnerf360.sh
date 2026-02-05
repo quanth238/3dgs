@@ -7,6 +7,10 @@ IMAGES="${IMAGES:-images_4}"
 ITERATIONS="${ITERATIONS:-30000}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-3}"
 export CUDA_VISIBLE_DEVICES
+DATA_DEVICE="${DATA_DEVICE:-cpu}"
+DENSIFY_GRAD_PERCENTILE="${DENSIFY_GRAD_PERCENTILE:-0.0}"
+FORCE_BASELINE="${FORCE_BASELINE:-0}"
+RUN_VALIDATE_ONLY="${RUN_VALIDATE_ONLY:-0}"
 RUN_MINIMAL="${RUN_MINIMAL:-1}"
 MINIMAL_STEPS="${MINIMAL_STEPS:-60}"
 RUN_ORACLE="${RUN_ORACLE:-1}"
@@ -22,7 +26,8 @@ BUDGET_MAX_VIEWS="${BUDGET_MAX_VIEWS:-10}"
 RASTER_ORIG="submodules/diff-gaussian-rasterization-3dgs"
 RASTER_FW="submodules/diff-gaussian-rasterization"
 
-SCENES=(bicycle flowers garden stump treehill room counter kitchen bonsai)
+# SCENES=(bicycle flowers garden stump treehill room counter kitchen bonsai)
+SCENES=(bicycle)
 IDX=$((RANDOM % ${#SCENES[@]}))
 SCENE="${SCENES[$IDX]}"
 SRC="${DATASET_ROOT}/${SCENE}"
@@ -30,6 +35,22 @@ SRC="${DATASET_ROOT}/${SCENE}"
 BASELINE_OUT="${OUT_ROOT}/${SCENE}_baseline"
 FW_OUT="${OUT_ROOT}/${SCENE}_fw"
 MINIMAL_OUT="${OUT_ROOT}/${SCENE}_minimal"
+BASELINE_PLY="${BASELINE_OUT}/point_cloud/iteration_${ITERATIONS}/point_cloud.ply"
+BASELINE_RENDER_DIR="${BASELINE_OUT}/test/ours_${ITERATIONS}/renders"
+FW_PLY="${FW_OUT}/point_cloud/iteration_${ITERATIONS}/point_cloud.ply"
+FW_RENDER_DIR="${FW_OUT}/test/ours_${ITERATIONS}/renders"
+
+NEED_BASELINE_TRAIN=0
+if [[ "${FORCE_BASELINE}" == "1" || ! -f "${BASELINE_PLY}" ]]; then
+  NEED_BASELINE_TRAIN=1
+fi
+NEED_BASELINE_RENDER=0
+if [[ ! -d "${BASELINE_RENDER_DIR}" ]]; then
+  NEED_BASELINE_RENDER=1
+fi
+if [[ "${NEED_BASELINE_TRAIN}" == "1" ]]; then
+  NEED_BASELINE_RENDER=1
+fi
 
 echo "Picked random scene: ${SCENE}"
 echo "Source: ${SRC}"
@@ -40,69 +61,107 @@ echo "Output minimal: ${MINIMAL_OUT}"
 
 mkdir -p "${BASELINE_OUT}" "${FW_OUT}" "${MINIMAL_OUT}"
 
-echo "==> Install ORIGINAL rasterizer (3DGS baseline)"
-pip uninstall -y diff-gaussian-rasterization >/dev/null 2>&1 || true
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" pip install -e "${RASTER_ORIG}" --no-build-isolation
+if [[ "${NEED_BASELINE_TRAIN}" == "1" || "${NEED_BASELINE_RENDER}" == "1" ]]; then
+  echo "==> Install ORIGINAL rasterizer (3DGS baseline)"
+  pip uninstall -y diff-gaussian-rasterization >/dev/null 2>&1 || true
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" pip install -e "${RASTER_ORIG}" --no-build-isolation
+  INSTALLED_ORIG=1
+else
+  INSTALLED_ORIG=0
+fi
 
-echo "==> Train baseline (original rasterizer)"
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python train.py -s "${SRC}" -i "${IMAGES}" -m "${BASELINE_OUT}" \
-  --disable_viewer --quiet --eval --iterations "${ITERATIONS}"
+if [[ "${NEED_BASELINE_TRAIN}" == "1" ]]; then
+  echo "==> Train baseline (original rasterizer)"
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python train.py -s "${SRC}" -i "${IMAGES}" -m "${BASELINE_OUT}" \
+    --disable_viewer --quiet --eval --iterations "${ITERATIONS}" --data_device "${DATA_DEVICE}"
+else
+  echo "==> Skip baseline training (found ${BASELINE_PLY})"
+fi
 
-echo "==> Render baseline"
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python render.py --iteration "${ITERATIONS}" -s "${SRC}" -i "${IMAGES}" -m "${BASELINE_OUT}" --quiet --eval --skip_train
+if [[ "${NEED_BASELINE_RENDER}" == "1" ]]; then
+  echo "==> Render baseline"
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python render.py --iteration "${ITERATIONS}" -s "${SRC}" -i "${IMAGES}" -m "${BASELINE_OUT}" --quiet --eval --skip_train --data_device "${DATA_DEVICE}"
+else
+  echo "==> Skip baseline render (found ${BASELINE_RENDER_DIR})"
+fi
 
-echo "==> Install FW rasterizer (modified)"
-pip uninstall -y diff-gaussian-rasterization >/dev/null 2>&1 || true
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" pip install -e "${RASTER_FW}" --no-build-isolation
+if [[ "${RUN_VALIDATE_ONLY}" == "1" ]]; then
+  if [[ ! -f "${FW_PLY}" ]]; then
+    echo "ERROR: RUN_VALIDATE_ONLY=1 but FW model not found at ${FW_PLY}"
+    exit 1
+  fi
+  echo "==> Install FW rasterizer (modified) for validation"
+  pip uninstall -y diff-gaussian-rasterization >/dev/null 2>&1 || true
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" pip install -e "${RASTER_FW}" --no-build-isolation
+elif [[ "${INSTALLED_ORIG}" == "1" ]]; then
+  echo "==> Install FW rasterizer (modified)"
+  pip uninstall -y diff-gaussian-rasterization >/dev/null 2>&1 || true
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" pip install -e "${RASTER_FW}" --no-build-isolation
+else
+  echo "==> Skip FW rasterizer install (baseline not forced)"
+fi
 
 if [[ "${RUN_MINIMAL}" == "1" ]]; then
   echo "==> Run minimal A/B/C validation (uses FW rasterizer)"
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/validate_fw_minimal.py -s "${SRC}" -i "${IMAGES}" -m "${MINIMAL_OUT}" \
-    --iteration -1 --steps "${MINIMAL_STEPS}" --topk 500 --out_dir "${MINIMAL_OUT}"
+    --iteration -1 --steps "${MINIMAL_STEPS}" --topk 500 --out_dir "${MINIMAL_OUT}" --depths "" --data_device "${DATA_DEVICE}"
 fi
 
-echo "==> Train FW (modified rasterizer)"
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python train.py -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" \
-  --disable_viewer --quiet --eval --iterations "${ITERATIONS}" \
-  --fw_densify
+if [[ "${RUN_VALIDATE_ONLY}" != "1" ]]; then
+  echo "==> Train FW (modified rasterizer)"
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python train.py -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" \
+    --disable_viewer --quiet --eval --iterations "${ITERATIONS}" --data_device "${DATA_DEVICE}" \
+    --densify_grad_percentile "${DENSIFY_GRAD_PERCENTILE}" \
+    --fw_densify
+else
+  echo "==> Skip FW training (RUN_VALIDATE_ONLY=1)"
+fi
 
-echo "==> Render FW"
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python render.py --iteration "${ITERATIONS}" -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" --quiet --eval --skip_train
+if [[ "${RUN_VALIDATE_ONLY}" != "1" ]]; then
+  echo "==> Render FW"
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python render.py --iteration "${ITERATIONS}" -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" --quiet --eval --skip_train --data_device "${DATA_DEVICE}"
+else
+  echo "==> Skip FW render (RUN_VALIDATE_ONLY=1)"
+fi
 
-echo "==> Metrics (baseline vs FW)"
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python metrics.py -m "${BASELINE_OUT}" "${FW_OUT}"
+if [[ "${RUN_VALIDATE_ONLY}" != "1" ]]; then
+  echo "==> Metrics (baseline vs FW)"
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python metrics.py -m "${BASELINE_OUT}" "${FW_OUT}"
+else
+  echo "==> Skip metrics (RUN_VALIDATE_ONLY=1)"
+fi
 
 echo "==> Sanity correlation (baseline vs FW) using FW rasterizer"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/validate_fw_sanity.py -s "${SRC}" -i "${IMAGES}" -m "${BASELINE_OUT}" --iteration "${ITERATIONS}" \
-  --out "${BASELINE_OUT}/fw_sanity.json"
+  --out "${BASELINE_OUT}/fw_sanity.json" --depths "" --data_device "${DATA_DEVICE}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/validate_fw_sanity.py -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" --iteration "${ITERATIONS}" \
-  --out "${FW_OUT}/fw_sanity.json"
+  --out "${FW_OUT}/fw_sanity.json" --depths "" --data_device "${DATA_DEVICE}"
 
 if [[ "${RUN_ORACLE}" == "1" ]]; then
   echo "==> Oracle quality tests (E4/E5) on FW model"
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/validate_fw_oracle.py -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" --iteration "${ITERATIONS}" \
     --num_candidates "${ORACLE_CANDIDATES}" --topk "${ORACLE_TOPK}" --inner_steps "${ORACLE_STEPS}" \
-    --out "${FW_OUT}/fw_oracle.json"
+    --out "${FW_OUT}/fw_oracle.json" --depths "" --data_device "${DATA_DEVICE}"
 fi
 
 if [[ "${RUN_ABLATION}" == "1" ]]; then
   echo "==> Ablation tests (A1/A2/A3/A4) on FW model"
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/validate_fw_ablation.py -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" --iteration "${ITERATIONS}" \
-    --num_candidates 200 --out "${FW_OUT}/fw_ablation.json"
+    --num_candidates 200 --out "${FW_OUT}/fw_ablation.json" --depths "" --data_device "${DATA_DEVICE}"
 fi
 
 if [[ "${RUN_PROFILE}" == "1" ]]; then
   echo "==> Profiling FW overhead"
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/profile_fw_overhead.py -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" --iteration "${ITERATIONS}" \
-    --iters 10 --out "${FW_OUT}/fw_overhead.json"
+    --iters 10 --out "${FW_OUT}/fw_overhead.json" --depths "" --data_device "${DATA_DEVICE}"
 fi
 
 if [[ "${RUN_BUDGET}" == "1" ]]; then
   echo "==> Budget-quality curves"
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/collect_budget_curve.py -s "${SRC}" -i "${IMAGES}" -m "${BASELINE_OUT}" --iterations ${BUDGET_ITERS} \
-    --max_views "${BUDGET_MAX_VIEWS}" --out "${BASELINE_OUT}/budget_curve.json"
+    --max_views "${BUDGET_MAX_VIEWS}" --out "${BASELINE_OUT}/budget_curve.json" --depths "" --data_device "${DATA_DEVICE}"
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/collect_budget_curve.py -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" --iterations ${BUDGET_ITERS} \
-    --max_views "${BUDGET_MAX_VIEWS}" --out "${FW_OUT}/budget_curve.json"
+    --max_views "${BUDGET_MAX_VIEWS}" --out "${FW_OUT}/budget_curve.json" --depths "" --data_device "${DATA_DEVICE}"
 fi
 
 echo "Done."

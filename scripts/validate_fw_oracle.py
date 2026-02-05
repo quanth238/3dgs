@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 import json
+import os
 import random
+import sys
 from argparse import ArgumentParser
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
+import torch.nn as nn
 
 from arguments import ModelParams, PipelineParams, OptimizationParams, get_combined_args
 from scene import Scene
@@ -15,6 +20,36 @@ try:
     from diff_gaussian_rasterization import compute_tile_residual, compute_fw_score
 except Exception as exc:
     raise RuntimeError("compute_tile_residual/compute_fw_score not available. Rebuild rasterizer.") from exc
+
+
+def _default_args():
+    default_parser = ArgumentParser(add_help=False)
+    ModelParams(default_parser)
+    PipelineParams(default_parser)
+    OptimizationParams(default_parser)
+    return default_parser.parse_args([])
+
+
+def _safe_get_args(parser: ArgumentParser):
+    args = parser.parse_args()
+    cfg_path = None
+    if hasattr(args, "model_path") and args.model_path:
+        cfg_path = os.path.join(args.model_path, "cfg_args")
+    if cfg_path and os.path.isfile(cfg_path):
+        return get_combined_args(parser)
+    defaults = _default_args()
+    for key, value in vars(defaults).items():
+        if hasattr(args, key) and getattr(args, key) is None:
+            setattr(args, key, value)
+    return args
+
+
+def _ensure_depths_available(dataset):
+    if getattr(dataset, "depths", ""):
+        depth_params = os.path.join(dataset.source_path, "sparse/0/depth_params.json")
+        if not os.path.isfile(depth_params):
+            print(f"Warning: depth_params.json not found at '{depth_params}'. Disabling depths.")
+            dataset.depths = ""
 
 
 def _rankdata(x: torch.Tensor) -> torch.Tensor:
@@ -41,6 +76,18 @@ def _zero_grads(gaussians):
               gaussians._opacity, gaussians._scaling, gaussians._rotation]:
         if p.grad is not None:
             p.grad.zero_()
+
+
+def _ensure_exposure(gaussians, scene):
+    if hasattr(gaussians, "_exposure"):
+        return
+    cams = scene.getTrainCameras() + scene.getTestCameras()
+    if len(cams) == 0:
+        return
+    gaussians.exposure_mapping = {cam.image_name: idx for idx, cam in enumerate(cams)}
+    gaussians.pretrained_exposures = None
+    exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cams), 1, 1)
+    gaussians._exposure = nn.Parameter(exposure.requires_grad_(True))
 
 
 def compute_scores(view, gaussians, pipe, opt, background):
@@ -128,19 +175,22 @@ def main():
     parser.add_argument("--topk", type=int, default=20)
     parser.add_argument("--inner_steps", type=int, default=10)
     parser.add_argument("--out", type=str, default=None)
-    args = get_combined_args(parser)
+    parser.add_argument("--quiet", action="store_true")
+    args = _safe_get_args(parser)
 
-    safe_state(True)
+    safe_state(args.quiet)
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
     dataset = model.extract(args)
+    _ensure_depths_available(dataset)
     pipe = pipeline.extract(args)
     opt_args = opt.extract(args)
 
     gaussians = GaussianModel(dataset.sh_degree, opt_args.optimizer_type)
     load_iter = args.iteration if args.iteration is not None and args.iteration >= 0 else None
     scene = Scene(dataset, gaussians, load_iteration=load_iter, shuffle=False)
+    _ensure_exposure(gaussians, scene)
     gaussians.training_setup(opt_args)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]

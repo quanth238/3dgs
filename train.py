@@ -45,6 +45,16 @@ try:
 except:
     FW_SCORE_AVAILABLE = False
 
+
+def _log_iter_stats(progress_bar, log_path, msg):
+    progress_bar.write(msg)
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
@@ -54,6 +64,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
+    iter_log_path = os.path.join(scene.model_path, "iter_stats.log")
+    try:
+        with open(iter_log_path, "w", encoding="utf-8") as f:
+            f.write("")
+    except Exception:
+        pass
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -74,6 +90,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_Ll1depth_for_log = 0.0
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+    last_eff_threshold = opt.densify_grad_threshold
+    last_eff_pct = getattr(opt, "densify_grad_percentile", 0.0)
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
         if network_gui.conn == None:
@@ -180,7 +198,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
-
             # Log and save
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
             if (iteration in saving_iterations):
@@ -197,13 +214,74 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 else:
                     gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
+                if opt.fw_densify:
+                    denom_raw = gaussians.fw_denom
+                    denom = denom_raw.clamp_min(1.0)
+                    grads_for_count = gaussians.fw_score_accum / denom
+                else:
+                    denom_raw = gaussians.denom
+                    denom = denom_raw.clamp_min(1.0)
+                    grads_for_count = gaussians.xyz_gradient_accum / denom
+                grads_for_count = grads_for_count.squeeze()
+                grads_for_count[grads_for_count.isnan()] = 0.0
+                if grads_for_count.dim() == 1:
+                    grad_norm = grads_for_count.abs()
+                else:
+                    grad_norm = torch.norm(grads_for_count, dim=-1)
+                denom_valid = denom_raw.squeeze() > 0
+                valid_mask = torch.logical_and(denom_valid, grad_norm > 0)
+                valid_norm = grad_norm[valid_mask]
+
+                if iteration % 200 == 0:
+                    num_pts = int(gaussians.get_xyz.shape[0])
+                    mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
+                    mem_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+                    p90 = float(torch.quantile(valid_norm, 0.90).item()) if valid_norm.numel() > 0 else 0.0
+                    p95 = float(torch.quantile(valid_norm, 0.95).item()) if valid_norm.numel() > 0 else 0.0
+                    p99 = float(torch.quantile(valid_norm, 0.99).item()) if valid_norm.numel() > 0 else 0.0
+                    scale_max = gaussians.get_scaling.max(dim=1).values
+                    sel_clone = torch.logical_and(
+                        grad_norm >= last_eff_threshold,
+                        scale_max <= gaussians.percent_dense * scene.cameras_extent
+                    )
+                    sel_split = torch.logical_and(
+                        grad_norm >= last_eff_threshold,
+                        scale_max > gaussians.percent_dense * scene.cameras_extent
+                    )
+                    sel_count = int((sel_clone | sel_split).sum().item())
+                    sel_ratio = sel_count / max(1, num_pts)
+                    valid_count = int(valid_norm.numel())
+                    valid_ratio = valid_count / max(1, num_pts)
+                    pct_msg = f" pct={last_eff_pct:.3f}" if last_eff_pct > 0 else ""
+                    msg = (
+                        f"[ITER {iteration}] points={num_pts} "
+                        f"sel={sel_count} ({sel_ratio:.4f}) "
+                        f"valid={valid_count} ({valid_ratio:.4f}) "
+                        f"clone={int(sel_clone.sum().item())} split={int(sel_split.sum().item())} "
+                        f"thr={last_eff_threshold:.6f}{pct_msg} "
+                        f"p90={p90:.6f} p95={p95:.6f} p99={p99:.6f} "
+                        f"mem_alloc={mem_alloc:.2f}G mem_reserved={mem_reserved:.2f}G"
+                    )
+                    _log_iter_stats(progress_bar, iter_log_path, msg)
+
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                    eff_threshold = opt.densify_grad_threshold
+                    eff_pct = getattr(opt, "densify_grad_percentile", 0.0)
+                    if eff_pct > 1.0:
+                        eff_pct = eff_pct / 100.0
+                    if eff_pct > 0.0:
+                        if valid_norm.numel() > 0:
+                            eff_threshold = float(torch.quantile(valid_norm, eff_pct).item())
+                        else:
+                            eff_threshold = float("inf")
+                    last_eff_threshold = eff_threshold
+                    last_eff_pct = eff_pct
                     if opt.fw_densify:
-                        fw_grads = gaussians.fw_score_accum / gaussians.fw_denom
-                        gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii, grads_override=fw_grads)
+                        fw_grads = gaussians.fw_score_accum / gaussians.fw_denom.clamp_min(1.0)
+                        gaussians.densify_and_prune(eff_threshold, 0.005, scene.cameras_extent, size_threshold, radii, grads_override=fw_grads)
                     else:
-                        gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
+                        gaussians.densify_and_prune(eff_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
