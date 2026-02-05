@@ -20,6 +20,8 @@
 #include <memory>
 #include "cuda_rasterizer/config.h"
 #include "cuda_rasterizer/rasterizer.h"
+#include "cuda_rasterizer/rasterizer_impl.h"
+#include "cuda_rasterizer/auxiliary.h"
 #include <fstream>
 #include <string>
 #include <functional>
@@ -241,4 +243,169 @@ torch::Tensor markVisible(
   }
   
   return present;
+}
+
+__global__ void tileResidualKernel(
+	const float* residual,
+	int H, int W,
+	float* out_tile,
+	int tiles_x,
+	int tiles_y)
+{
+	int idx = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+	int total = H * W;
+	if (idx >= total) return;
+
+	int y = idx / W;
+	int x = idx - y * W;
+	int tile_x = x / BLOCK_X;
+	int tile_y = y / BLOCK_Y;
+	if (tile_x >= tiles_x || tile_y >= tiles_y) return;
+
+	int tile_id = tile_y * tiles_x + tile_x;
+	int plane = H * W;
+	atomicAdd(out_tile + tile_id * 3 + 0, residual[idx]);
+	atomicAdd(out_tile + tile_id * 3 + 1, residual[plane + idx]);
+	atomicAdd(out_tile + tile_id * 3 + 2, residual[plane * 2 + idx]);
+}
+
+torch::Tensor computeTileResidualCUDA(
+	const torch::Tensor& residual)
+{
+	TORCH_CHECK(residual.is_cuda(), "residual must be a CUDA tensor");
+	TORCH_CHECK(residual.dim() == 3 && residual.size(0) == 3, "residual must have shape [3, H, W]");
+	TORCH_CHECK(residual.scalar_type() == at::kFloat, "residual must be float32");
+
+	auto res = residual.contiguous();
+	const int H = res.size(1);
+	const int W = res.size(2);
+	const int tiles_x = (W + BLOCK_X - 1) / BLOCK_X;
+	const int tiles_y = (H + BLOCK_Y - 1) / BLOCK_Y;
+	const int num_tiles = tiles_x * tiles_y;
+
+	auto out = torch::zeros({num_tiles, 3}, res.options().dtype(torch::kFloat32));
+
+	const int threads = 256;
+	const int total = H * W;
+	const int blocks = (total + threads - 1) / threads;
+	tileResidualKernel<<<blocks, threads>>>(
+		res.data_ptr<float>(),
+		H, W,
+		out.data_ptr<float>(),
+		tiles_x, tiles_y);
+	auto kernel_err = cudaGetLastError();
+	TORCH_CHECK(kernel_err == cudaSuccess, "tileResidualKernel failed: ", cudaGetErrorString(kernel_err));
+
+	return out;
+}
+
+__global__ void computeFwScoreKernel(
+	int P,
+	const uint32_t* tiles_touched,
+	const uint32_t* point_offsets,
+	const uint64_t* point_list_keys_unsorted,
+	const float* tile_residual,
+	int num_tiles,
+	const int* radii,
+	float* out_score,
+	int normalize_mode)
+{
+	int idx = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+	if (idx >= P) return;
+
+	if (radii[idx] <= 0)
+	{
+		out_score[idx] = 0.0f;
+		return;
+	}
+
+	uint32_t count = tiles_touched[idx];
+	if (count == 0)
+	{
+		out_score[idx] = 0.0f;
+		return;
+	}
+
+	uint32_t off = (idx == 0) ? 0 : point_offsets[idx - 1];
+
+	float s0 = 0.0f;
+	float s1 = 0.0f;
+	float s2 = 0.0f;
+	for (uint32_t j = 0; j < count; ++j)
+	{
+		uint64_t key = point_list_keys_unsorted[off + j];
+		uint32_t tile = (uint32_t)(key >> 32);
+		if (tile < (uint32_t)num_tiles)
+		{
+			const float* tr = tile_residual + tile * 3;
+			s0 += tr[0];
+			s1 += tr[1];
+			s2 += tr[2];
+		}
+	}
+
+	if (normalize_mode == 1)
+	{
+		float inv = 1.0f / (float)count;
+		s0 *= inv; s1 *= inv; s2 *= inv;
+	}
+	else if (normalize_mode == 2)
+	{
+		float inv = rsqrtf((float)count);
+		s0 *= inv; s1 *= inv; s2 *= inv;
+	}
+
+	out_score[idx] = sqrtf(s0 * s0 + s1 * s1 + s2 * s2);
+}
+
+torch::Tensor computeFwScoreCUDA(
+	const torch::Tensor& tile_residual,
+	const torch::Tensor& radii,
+	const torch::Tensor& geomBuffer,
+	const torch::Tensor& binningBuffer,
+	const int normalize_mode)
+{
+	TORCH_CHECK(tile_residual.is_cuda(), "tile_residual must be a CUDA tensor");
+	TORCH_CHECK(radii.is_cuda(), "radii must be a CUDA tensor");
+	TORCH_CHECK(geomBuffer.is_cuda(), "geomBuffer must be a CUDA tensor");
+	TORCH_CHECK(binningBuffer.is_cuda(), "binningBuffer must be a CUDA tensor");
+	TORCH_CHECK(tile_residual.dim() == 2 && tile_residual.size(1) == 3, "tile_residual must have shape [num_tiles, 3]");
+
+	const int P = radii.size(0);
+	auto out_score = torch::zeros({P}, tile_residual.options().dtype(torch::kFloat32));
+	if (P == 0)
+	{
+		return out_score;
+	}
+
+	auto tile = tile_residual.contiguous();
+	auto radii_c = radii.contiguous();
+
+	char* geom_chunk = reinterpret_cast<char*>(geomBuffer.contiguous().data_ptr());
+	CudaRasterizer::GeometryState geomState = CudaRasterizer::GeometryState::fromChunk(geom_chunk, P);
+
+	uint32_t num_rendered = 0;
+	auto copy_err = cudaMemcpy(&num_rendered, geomState.point_offsets + P - 1, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+	TORCH_CHECK(copy_err == cudaSuccess, "cudaMemcpy failed: ", cudaGetErrorString(copy_err));
+
+	char* binning_chunk = reinterpret_cast<char*>(binningBuffer.contiguous().data_ptr());
+	CudaRasterizer::BinningState binningState = CudaRasterizer::BinningState::fromChunk(binning_chunk, num_rendered);
+
+	const int num_tiles = (int)tile.size(0);
+	const int threads = 256;
+	const int blocks = (P + threads - 1) / threads;
+	computeFwScoreKernel<<<blocks, threads>>>(
+		P,
+		geomState.tiles_touched,
+		geomState.point_offsets,
+		binningState.point_list_keys_unsorted,
+		tile.data_ptr<float>(),
+		num_tiles,
+		radii_c.data_ptr<int>(),
+		out_score.data_ptr<float>(),
+		normalize_mode);
+	auto kernel_err = cudaGetLastError();
+	TORCH_CHECK(kernel_err == cudaSuccess, "computeFwScoreKernel failed: ", cudaGetErrorString(kernel_err));
+
+	return out_score;
 }

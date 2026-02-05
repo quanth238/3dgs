@@ -60,6 +60,8 @@ class GaussianModel:
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
+        self.fw_score_accum = torch.empty(0)
+        self.fw_denom = torch.empty(0)
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
@@ -77,26 +79,54 @@ class GaussianModel:
             self.max_radii2D,
             self.xyz_gradient_accum,
             self.denom,
+            self.fw_score_accum,
+            self.fw_denom,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
         )
     
     def restore(self, model_args, training_args):
-        (self.active_sh_degree, 
-        self._xyz, 
-        self._features_dc, 
-        self._features_rest,
-        self._scaling, 
-        self._rotation, 
-        self._opacity,
-        self.max_radii2D, 
-        xyz_gradient_accum, 
-        denom,
-        opt_dict, 
-        self.spatial_lr_scale) = model_args
+        if len(model_args) == 12:
+            (self.active_sh_degree, 
+            self._xyz, 
+            self._features_dc, 
+            self._features_rest,
+            self._scaling, 
+            self._rotation, 
+            self._opacity,
+            self.max_radii2D, 
+            xyz_gradient_accum, 
+            denom,
+            opt_dict, 
+            self.spatial_lr_scale) = model_args
+            fw_score_accum = None
+            fw_denom = None
+        elif len(model_args) == 14:
+            (self.active_sh_degree, 
+            self._xyz, 
+            self._features_dc, 
+            self._features_rest,
+            self._scaling, 
+            self._rotation, 
+            self._opacity,
+            self.max_radii2D, 
+            xyz_gradient_accum, 
+            denom,
+            fw_score_accum,
+            fw_denom,
+            opt_dict, 
+            self.spatial_lr_scale) = model_args
+        else:
+            raise ValueError("Unexpected checkpoint format for GaussianModel.capture()")
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
+        if fw_score_accum is not None and fw_denom is not None:
+            self.fw_score_accum = fw_score_accum
+            self.fw_denom = fw_denom
+        else:
+            self.fw_score_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+            self.fw_denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.optimizer.load_state_dict(opt_dict)
 
     @property
@@ -179,6 +209,8 @@ class GaussianModel:
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.fw_score_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.fw_denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
@@ -360,6 +392,8 @@ class GaussianModel:
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
 
         self.denom = self.denom[valid_points_mask]
+        self.fw_score_accum = self.fw_score_accum[valid_points_mask]
+        self.fw_denom = self.fw_denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
         self.tmp_radii = self.tmp_radii[valid_points_mask]
 
@@ -404,6 +438,8 @@ class GaussianModel:
         self.tmp_radii = torch.cat((self.tmp_radii, new_tmp_radii))
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.fw_score_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.fw_denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
@@ -449,8 +485,11 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
-        grads = self.xyz_gradient_accum / self.denom
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii, grads_override=None):
+        if grads_override is None:
+            grads = self.xyz_gradient_accum / self.denom
+        else:
+            grads = grads_override
         grads[grads.isnan()] = 0.0
 
         self.tmp_radii = radii
@@ -471,3 +510,9 @@ class GaussianModel:
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
+
+    def add_fw_stats(self, fw_score, update_filter):
+        if fw_score.dim() == 1:
+            fw_score = fw_score.unsqueeze(-1)
+        self.fw_score_accum[update_filter] += fw_score[update_filter]
+        self.fw_denom[update_filter] += 1

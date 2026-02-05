@@ -69,3 +69,13 @@ torch::Tensor markVisible(
 		torch::Tensor& means3D,
 		torch::Tensor& viewmatrix,
 		torch::Tensor& projmatrix);
+
+torch::Tensor computeTileResidualCUDA(
+	const torch::Tensor& residual);
+
+torch::Tensor computeFwScoreCUDA(
+	const torch::Tensor& tile_residual,
+	const torch::Tensor& radii,
+	const torch::Tensor& geomBuffer,
+	const torch::Tensor& binningBuffer,
+	const int normalize_mode);

@@ -39,6 +39,11 @@ try:
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
+try:
+    from diff_gaussian_rasterization import compute_fw_score, compute_tile_residual
+    FW_SCORE_AVAILABLE = True
+except:
+    FW_SCORE_AVAILABLE = False
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
 
@@ -108,12 +113,28 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
 
-        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-        image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        should_densify = (iteration < opt.densify_until_iter and
+                          iteration > opt.densify_from_iter and
+                          iteration % opt.densification_interval == 0)
+        need_fw_stats = opt.fw_densify and should_densify
+        if opt.fw_densify and not FW_SCORE_AVAILABLE:
+            raise RuntimeError("fw_densify is enabled but compute_fw_score is not available. Rebuild the rasterizer.")
 
+        render_pkg = render(
+            viewpoint_cam,
+            gaussians,
+            pipe,
+            bg,
+            use_trained_exp=dataset.train_test_exp,
+            separate_sh=SPARSE_ADAM_AVAILABLE,
+            return_aux=need_fw_stats
+        )
+        image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         if viewpoint_cam.alpha_mask is not None:
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
+        if need_fw_stats:
+            image.retain_grad()
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
@@ -144,6 +165,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         iter_end.record()
 
         with torch.no_grad():
+            fw_score = None
+            if need_fw_stats:
+                residual_img = image.grad.detach()
+                tile_residual = compute_tile_residual(residual_img)
+                fw_score = compute_fw_score(tile_residual, radii, render_pkg["geomBuffer"], render_pkg["binningBuffer"], opt.fw_norm_mode)
+
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
@@ -164,11 +191,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                if opt.fw_densify:
+                    if need_fw_stats:
+                        gaussians.add_fw_stats(fw_score, visibility_filter)
+                else:
+                    gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
+                    if opt.fw_densify:
+                        fw_grads = gaussians.fw_score_accum / gaussians.fw_denom
+                        gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii, grads_override=fw_grads)
+                    else:
+                        gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
