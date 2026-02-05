@@ -88,28 +88,51 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
     if separate_sh:
-        raster_out = rasterizer(
-            means3D = means3D,
-            means2D = means2D,
-            dc = dc,
-            shs = shs,
-            colors_precomp = colors_precomp,
-            opacities = opacity,
-            scales = scales,
-            rotations = rotations,
-            cov3D_precomp = cov3D_precomp,
-            return_aux = return_aux)
+        if return_aux:
+            raster_out = rasterizer(
+                means3D = means3D,
+                means2D = means2D,
+                dc = dc,
+                shs = shs,
+                colors_precomp = colors_precomp,
+                opacities = opacity,
+                scales = scales,
+                rotations = rotations,
+                cov3D_precomp = cov3D_precomp,
+                return_aux = True)
+        else:
+            raster_out = rasterizer(
+                means3D = means3D,
+                means2D = means2D,
+                dc = dc,
+                shs = shs,
+                colors_precomp = colors_precomp,
+                opacities = opacity,
+                scales = scales,
+                rotations = rotations,
+                cov3D_precomp = cov3D_precomp)
     else:
-        raster_out = rasterizer(
-            means3D = means3D,
-            means2D = means2D,
-            shs = shs,
-            colors_precomp = colors_precomp,
-            opacities = opacity,
-            scales = scales,
-            rotations = rotations,
-            cov3D_precomp = cov3D_precomp,
-            return_aux = return_aux)
+        if return_aux:
+            raster_out = rasterizer(
+                means3D = means3D,
+                means2D = means2D,
+                shs = shs,
+                colors_precomp = colors_precomp,
+                opacities = opacity,
+                scales = scales,
+                rotations = rotations,
+                cov3D_precomp = cov3D_precomp,
+                return_aux = True)
+        else:
+            raster_out = rasterizer(
+                means3D = means3D,
+                means2D = means2D,
+                shs = shs,
+                colors_precomp = colors_precomp,
+                opacities = opacity,
+                scales = scales,
+                rotations = rotations,
+                cov3D_precomp = cov3D_precomp)
     
     if return_aux:
         rendered_image, radii, depth_image, geomBuffer, binningBuffer, imgBuffer = raster_out
