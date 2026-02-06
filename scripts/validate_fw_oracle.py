@@ -17,9 +17,9 @@ from utils.loss_utils import l1_loss, ssim
 from utils.general_utils import safe_state
 
 try:
-    from diff_gaussian_rasterization import compute_tile_residual, compute_fw_score
+    from diff_gaussian_rasterization import compute_tile_moments, compute_fw_score
 except Exception as exc:
-    raise RuntimeError("compute_tile_residual/compute_fw_score not available. Rebuild rasterizer.") from exc
+    raise RuntimeError("compute_tile_moments/compute_fw_score not available. Rebuild rasterizer.") from exc
 
 
 def _default_args():
@@ -107,11 +107,13 @@ def compute_scores(view, gaussians, pipe, opt, background):
     residual_grad = image.grad.detach()
     residual_abs = (image.detach() - gt_image).abs()
 
-    tile_grad = compute_tile_residual(residual_grad)
-    tile_abs = compute_tile_residual(residual_abs)
+    tile_grad, tile_grad_energy = compute_tile_moments(residual_grad)
+    tile_abs, tile_abs_energy = compute_tile_moments(residual_abs)
+    _, H, W = residual_grad.shape
+    tiles_x = (W + 16 - 1) // 16
 
-    fw_score = compute_fw_score(tile_grad, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 0)
-    abs_score = compute_fw_score(tile_abs, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 0)
+    fw_score = compute_fw_score(tile_grad, tile_grad_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], opt.fw_norm_mode)
+    abs_score = compute_fw_score(tile_abs, tile_abs_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], opt.fw_norm_mode)
     mean2d_score = torch.norm(render_pkg["viewspace_points"].grad[:, :2], dim=-1)
 
     feat_dc = gaussians._features_dc.grad

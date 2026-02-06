@@ -9,6 +9,9 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-3}"
 export CUDA_VISIBLE_DEVICES
 DATA_DEVICE="${DATA_DEVICE:-cpu}"
 DENSIFY_GRAD_PERCENTILE="${DENSIFY_GRAD_PERCENTILE:-0.0}"
+FW_NORM_MODE="${FW_NORM_MODE:-4}"
+DENSIFY_TOPK="${DENSIFY_TOPK:-0}"
+DENSIFY_TOPK_RATIO="${DENSIFY_TOPK_RATIO:-0.01}"
 FORCE_BASELINE="${FORCE_BASELINE:-0}"
 RUN_VALIDATE_ONLY="${RUN_VALIDATE_ONLY:-0}"
 RUN_MINIMAL="${RUN_MINIMAL:-1}"
@@ -104,7 +107,8 @@ fi
 if [[ "${RUN_MINIMAL}" == "1" ]]; then
   echo "==> Run minimal A/B/C validation (uses FW rasterizer)"
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/validate_fw_minimal.py -s "${SRC}" -i "${IMAGES}" -m "${MINIMAL_OUT}" \
-    --iteration -1 --steps "${MINIMAL_STEPS}" --topk 500 --out_dir "${MINIMAL_OUT}" --depths "" --data_device "${DATA_DEVICE}"
+    --iteration -1 --steps "${MINIMAL_STEPS}" --topk 500 --out_dir "${MINIMAL_OUT}" --depths "" --data_device "${DATA_DEVICE}" \
+    --fw_norm_mode "${FW_NORM_MODE}"
 fi
 
 if [[ "${RUN_VALIDATE_ONLY}" != "1" ]]; then
@@ -112,6 +116,8 @@ if [[ "${RUN_VALIDATE_ONLY}" != "1" ]]; then
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python train.py -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" \
     --disable_viewer --quiet --eval --iterations "${ITERATIONS}" --data_device "${DATA_DEVICE}" \
     --densify_grad_percentile "${DENSIFY_GRAD_PERCENTILE}" \
+    --densify_topk "${DENSIFY_TOPK}" --densify_topk_ratio "${DENSIFY_TOPK_RATIO}" \
+    --fw_norm_mode "${FW_NORM_MODE}" \
     --fw_densify
 else
   echo "==> Skip FW training (RUN_VALIDATE_ONLY=1)"
@@ -133,27 +139,27 @@ fi
 
 echo "==> Sanity correlation (baseline vs FW) using FW rasterizer"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/validate_fw_sanity.py -s "${SRC}" -i "${IMAGES}" -m "${BASELINE_OUT}" --iteration "${ITERATIONS}" \
-  --out "${BASELINE_OUT}/fw_sanity.json" --depths "" --data_device "${DATA_DEVICE}"
+  --out "${BASELINE_OUT}/fw_sanity.json" --depths "" --data_device "${DATA_DEVICE}" --fw_norm_mode "${FW_NORM_MODE}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/validate_fw_sanity.py -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" --iteration "${ITERATIONS}" \
-  --out "${FW_OUT}/fw_sanity.json" --depths "" --data_device "${DATA_DEVICE}"
+  --out "${FW_OUT}/fw_sanity.json" --depths "" --data_device "${DATA_DEVICE}" --fw_norm_mode "${FW_NORM_MODE}"
 
 if [[ "${RUN_ORACLE}" == "1" ]]; then
   echo "==> Oracle quality tests (E4/E5) on FW model"
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/validate_fw_oracle.py -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" --iteration "${ITERATIONS}" \
     --num_candidates "${ORACLE_CANDIDATES}" --topk "${ORACLE_TOPK}" --inner_steps "${ORACLE_STEPS}" \
-    --out "${FW_OUT}/fw_oracle.json" --depths "" --data_device "${DATA_DEVICE}"
+    --out "${FW_OUT}/fw_oracle.json" --depths "" --data_device "${DATA_DEVICE}" --fw_norm_mode "${FW_NORM_MODE}"
 fi
 
 if [[ "${RUN_ABLATION}" == "1" ]]; then
   echo "==> Ablation tests (A1/A2/A3/A4) on FW model"
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/validate_fw_ablation.py -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" --iteration "${ITERATIONS}" \
-    --num_candidates 200 --out "${FW_OUT}/fw_ablation.json" --depths "" --data_device "${DATA_DEVICE}"
+    --num_candidates 200 --out "${FW_OUT}/fw_ablation.json" --depths "" --data_device "${DATA_DEVICE}" --fw_norm_mode "${FW_NORM_MODE}"
 fi
 
 if [[ "${RUN_PROFILE}" == "1" ]]; then
   echo "==> Profiling FW overhead"
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/profile_fw_overhead.py -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" --iteration "${ITERATIONS}" \
-    --iters 10 --out "${FW_OUT}/fw_overhead.json" --depths "" --data_device "${DATA_DEVICE}"
+    --iters 10 --out "${FW_OUT}/fw_overhead.json" --depths "" --data_device "${DATA_DEVICE}" --fw_norm_mode "${FW_NORM_MODE}"
 fi
 
 if [[ "${RUN_BUDGET}" == "1" ]]; then

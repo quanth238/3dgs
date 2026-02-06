@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <tuple>
 #include <string>
+#include <vector>
 	
 std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
@@ -73,9 +74,14 @@ torch::Tensor markVisible(
 torch::Tensor computeTileResidualCUDA(
 	const torch::Tensor& residual);
 
+std::vector<torch::Tensor> computeTileMomentsCUDA(
+	const torch::Tensor& residual);
+
 torch::Tensor computeFwScoreCUDA(
 	const torch::Tensor& tile_residual,
+	const torch::Tensor& tile_energy,
+	const int tiles_x,
 	const torch::Tensor& radii,
 	const torch::Tensor& geomBuffer,
 	const torch::Tensor& binningBuffer,
-	const int normalize_mode);
+	const int score_mode);

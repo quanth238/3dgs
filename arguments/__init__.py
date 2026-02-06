@@ -94,6 +94,11 @@ class OptimizationParams(ParamGroup):
         self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0002
         self.densify_grad_percentile = 0.0
+        self.densify_grad_percentile_start = 0.0
+        self.densify_grad_percentile_end = 0.0
+        self.densify_grad_percentile_ramp = 0
+        self.densify_topk = 0
+        self.densify_topk_ratio = 0.0
         self.fw_densify = False
         self.fw_norm_mode = 0
         self.depth_l1_weight_init = 1.0

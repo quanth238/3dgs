@@ -332,8 +332,11 @@ class GaussianRasterizer(nn.Module):
             raster_settings, 
         )
 
-def compute_fw_score(tile_residual, radii, geomBuffer, binningBuffer, normalize_mode=0):
-    return _C.compute_fw_score(tile_residual, radii, geomBuffer, binningBuffer, normalize_mode)
+def compute_fw_score(tile_residual, tile_energy, tiles_x, radii, geomBuffer, binningBuffer, score_mode=0):
+    return _C.compute_fw_score(tile_residual, tile_energy, tiles_x, radii, geomBuffer, binningBuffer, score_mode)
 
 def compute_tile_residual(residual):
     return _C.compute_tile_residual(residual)
+
+def compute_tile_moments(residual):
+    return _C.compute_tile_moments(residual)

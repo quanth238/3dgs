@@ -40,7 +40,7 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 try:
-    from diff_gaussian_rasterization import compute_fw_score, compute_tile_residual
+    from diff_gaussian_rasterization import compute_fw_score, compute_tile_moments
     FW_SCORE_AVAILABLE = True
 except:
     FW_SCORE_AVAILABLE = False
@@ -53,6 +53,21 @@ def _log_iter_stats(progress_bar, log_path, msg):
             f.write(msg + "\n")
     except Exception:
         pass
+
+
+def _effective_percentile(opt, iteration):
+    start = getattr(opt, "densify_grad_percentile_start", 0.0)
+    end = getattr(opt, "densify_grad_percentile_end", 0.0)
+    ramp = getattr(opt, "densify_grad_percentile_ramp", 0)
+    if start > 0.0 and end > 0.0 and ramp > 0:
+        t = (iteration - opt.densify_from_iter) / float(ramp)
+        t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+        pct = start + (end - start) * t
+    else:
+        pct = getattr(opt, "densify_grad_percentile", 0.0)
+    if pct > 1.0:
+        pct = pct / 100.0
+    return pct
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
@@ -91,7 +106,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     last_eff_threshold = opt.densify_grad_threshold
-    last_eff_pct = getattr(opt, "densify_grad_percentile", 0.0)
+    last_eff_pct = _effective_percentile(opt, first_iter)
+    last_eff_topk = int(getattr(opt, "densify_topk", 0) or 0)
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
         if network_gui.conn == None:
@@ -186,8 +202,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             fw_score = None
             if need_fw_stats:
                 residual_img = image.grad.detach()
-                tile_residual = compute_tile_residual(residual_img)
-                fw_score = compute_fw_score(tile_residual, radii, render_pkg["geomBuffer"], render_pkg["binningBuffer"], opt.fw_norm_mode)
+                tile_residual, tile_energy = compute_tile_moments(residual_img)
+                _, H, W = residual_img.shape
+                tiles_x = (W + 16 - 1) // 16
+                fw_score = compute_fw_score(
+                    tile_residual,
+                    tile_energy,
+                    tiles_x,
+                    radii,
+                    render_pkg["geomBuffer"],
+                    render_pkg["binningBuffer"],
+                    opt.fw_norm_mode,
+                )
 
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -253,12 +279,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     valid_count = int(valid_norm.numel())
                     valid_ratio = valid_count / max(1, num_pts)
                     pct_msg = f" pct={last_eff_pct:.3f}" if last_eff_pct > 0 else ""
+                    topk_msg = f" topk={last_eff_topk}" if last_eff_topk > 0 else ""
                     msg = (
                         f"[ITER {iteration}] points={num_pts} "
                         f"sel={sel_count} ({sel_ratio:.4f}) "
                         f"valid={valid_count} ({valid_ratio:.4f}) "
                         f"clone={int(sel_clone.sum().item())} split={int(sel_split.sum().item())} "
-                        f"thr={last_eff_threshold:.6f}{pct_msg} "
+                        f"thr={last_eff_threshold:.6f}{pct_msg}{topk_msg} "
                         f"p90={p90:.6f} p95={p95:.6f} p99={p99:.6f} "
                         f"mem_alloc={mem_alloc:.2f}G mem_reserved={mem_reserved:.2f}G"
                     )
@@ -267,16 +294,29 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     eff_threshold = opt.densify_grad_threshold
-                    eff_pct = getattr(opt, "densify_grad_percentile", 0.0)
-                    if eff_pct > 1.0:
-                        eff_pct = eff_pct / 100.0
-                    if eff_pct > 0.0:
+                    eff_pct = _effective_percentile(opt, iteration)
+                    eff_topk = int(getattr(opt, "densify_topk", 0) or 0)
+                    eff_topk_ratio = float(getattr(opt, "densify_topk_ratio", 0.0) or 0.0)
+                    if eff_topk_ratio > 0.0:
+                        eff_topk = int(valid_norm.numel() * eff_topk_ratio)
+
+                    if eff_topk > 0:
+                        if valid_norm.numel() > eff_topk:
+                            eff_threshold = float(torch.topk(valid_norm, eff_topk, largest=True, sorted=True).values[-1].item())
+                        elif valid_norm.numel() > 0:
+                            eff_threshold = float("-inf")
+                        else:
+                            eff_threshold = float("inf")
+                        eff_pct = 0.0
+                    elif eff_pct > 0.0:
                         if valid_norm.numel() > 0:
                             eff_threshold = float(torch.quantile(valid_norm, eff_pct).item())
                         else:
                             eff_threshold = float("inf")
+
                     last_eff_threshold = eff_threshold
                     last_eff_pct = eff_pct
+                    last_eff_topk = eff_topk
                     if opt.fw_densify:
                         fw_grads = gaussians.fw_score_accum / gaussians.fw_denom.clamp_min(1.0)
                         gaussians.densify_and_prune(eff_threshold, 0.005, scene.cameras_extent, size_threshold, radii, grads_override=fw_grads)

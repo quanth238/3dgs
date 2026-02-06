@@ -17,9 +17,9 @@ from utils.loss_utils import l1_loss, ssim
 from utils.general_utils import safe_state
 
 try:
-    from diff_gaussian_rasterization import compute_tile_residual, compute_fw_score
+    from diff_gaussian_rasterization import compute_tile_moments, compute_fw_score
 except Exception as exc:
-    raise RuntimeError("compute_tile_residual/compute_fw_score not available. Rebuild rasterizer.") from exc
+    raise RuntimeError("compute_tile_moments/compute_fw_score not available. Rebuild rasterizer.") from exc
 
 
 def _default_args():
@@ -129,8 +129,10 @@ def main():
         loss.backward()
 
         residual_img = image.grad.detach()
-        tile_residual = compute_tile_residual(residual_img)
-        fw_score = compute_fw_score(tile_residual, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 0)
+        tile_residual, tile_energy = compute_tile_moments(residual_img)
+        _, H, W = residual_img.shape
+        tiles_x = (W + 16 - 1) // 16
+        fw_score = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], opt.fw_norm_mode)
 
         feat_dc = gaussians._features_dc.grad
         feat_rest = gaussians._features_rest.grad
