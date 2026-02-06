@@ -160,3 +160,79 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         out["imgBuffer"] = imgBuffer
     
     return out
+
+
+def render_aux(viewpoint_camera, pc: GaussianModel, pipe, override_color: torch.Tensor, scaling_modifier=1.0, bg_color=None):
+    """
+    Auxiliary render pass for AW-SRM statistics.
+    Uses override_color (requires_grad=True) and detaches all Gaussian params.
+    No exposure and no clamp. Background is zero by default.
+    """
+    if override_color is None:
+        raise ValueError("render_aux requires override_color")
+
+    device = pc.get_xyz.device
+    dtype = pc.get_xyz.dtype
+    if bg_color is None:
+        bg_color = torch.zeros(3, device=device, dtype=dtype)
+    else:
+        bg_color = bg_color.to(device=device, dtype=dtype)
+
+    # No need for screen-space gradients in aux pass.
+    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=dtype, device=device, requires_grad=False)
+
+    tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+    tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+    raster_settings = GaussianRasterizationSettings(
+        image_height=int(viewpoint_camera.image_height),
+        image_width=int(viewpoint_camera.image_width),
+        tanfovx=tanfovx,
+        tanfovy=tanfovy,
+        bg=bg_color,
+        scale_modifier=scaling_modifier,
+        viewmatrix=viewpoint_camera.world_view_transform,
+        projmatrix=viewpoint_camera.full_proj_transform,
+        sh_degree=pc.active_sh_degree,
+        campos=viewpoint_camera.camera_center,
+        prefiltered=False,
+        debug=pipe.debug,
+        antialiasing=pipe.antialiasing,
+    )
+
+    rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+
+    means3D = pc.get_xyz.detach()
+    means2D = screenspace_points
+    opacity = pc.get_opacity.detach()
+
+    scales = None
+    rotations = None
+    cov3D_precomp = None
+    if pipe.compute_cov3D_python:
+        cov3D_precomp = pc.get_covariance(scaling_modifier).detach()
+    else:
+        scales = pc.get_scaling.detach()
+        rotations = pc.get_rotation.detach()
+
+    # colors_precomp is required for aux pass
+    colors_precomp = override_color
+
+    rendered_image, radii, depth_image = rasterizer(
+        means3D=means3D,
+        means2D=means2D,
+        shs=None,
+        colors_precomp=colors_precomp,
+        opacities=opacity,
+        scales=scales,
+        rotations=rotations,
+        cov3D_precomp=cov3D_precomp
+    )
+
+    out = {
+        "render": rendered_image,
+        "viewspace_points": screenspace_points,
+        "visibility_filter": (radii > 0).nonzero(),
+        "radii": radii,
+        "depth": depth_image,
+    }
+    return out

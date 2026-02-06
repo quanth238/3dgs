@@ -13,7 +13,7 @@ import os
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
-from gaussian_renderer import render, network_gui
+from gaussian_renderer import render, render_aux, network_gui
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state, get_expon_lr_func
@@ -39,11 +39,7 @@ try:
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
-try:
-    from diff_gaussian_rasterization import compute_fw_score, compute_tile_moments
-    FW_SCORE_AVAILABLE = True
-except:
-    FW_SCORE_AVAILABLE = False
+
 
 
 def _log_iter_stats(progress_bar, log_path, msg):
@@ -68,6 +64,41 @@ def _effective_percentile(opt, iteration):
     if pct > 1.0:
         pct = pct / 100.0
     return pct
+
+
+def _adjoint_phi(image, gt_image):
+    diff = (image.detach() - gt_image).abs()
+    return diff.sum(dim=0, keepdim=True)
+
+
+def _adjoint_scores(viewpoint_cam, gaussians, pipe, image, gt_image):
+    phi_scalar = _adjoint_phi(image, gt_image)
+    phi = phi_scalar.repeat(3, 1, 1)
+    ones = torch.ones_like(phi)
+
+    def _grad_for(signal):
+        aux = torch.ones((gaussians.get_xyz.shape[0], 3), device="cuda", requires_grad=True)
+        aux_img = render_aux(
+            viewpoint_cam,
+            gaussians,
+            pipe,
+            override_color=aux,
+        )["render"]
+        if viewpoint_cam.alpha_mask is not None:
+            aux_img = aux_img * viewpoint_cam.alpha_mask.cuda()
+        loss = (aux_img * signal).sum()
+        grad = torch.autograd.grad(loss, aux, retain_graph=False, create_graph=False, allow_unused=False)[0]
+        return grad.sum(dim=-1)
+
+    with torch.enable_grad():
+        M = _grad_for(phi)
+        Q = _grad_for(phi * phi)
+        Z = _grad_for(ones)
+
+    M = M.clamp_min(0.0)
+    Q = Q.clamp_min(0.0)
+    Z = Z.clamp_min(0.0)
+    return M, Q, Z
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
@@ -98,7 +129,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     use_sparse_adam = opt.optimizer_type == "sparse_adam" and SPARSE_ADAM_AVAILABLE 
     depth_l1_weight = get_expon_lr_func(opt.depth_l1_weight_init, opt.depth_l1_weight_final, max_steps=opt.iterations)
-
     viewpoint_stack = scene.getTrainCameras().copy()
     viewpoint_indices = list(range(len(viewpoint_stack)))
     ema_loss_for_log = 0.0
@@ -153,10 +183,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         should_densify = (iteration < opt.densify_until_iter and
                           iteration > opt.densify_from_iter and
                           iteration % opt.densification_interval == 0)
-        need_fw_stats = opt.fw_densify and should_densify
-        if opt.fw_densify and not FW_SCORE_AVAILABLE:
-            raise RuntimeError("fw_densify is enabled but compute_fw_score is not available. Rebuild the rasterizer.")
-
+        collect_every = max(1, min(32, opt.densification_interval // 4))
+        should_collect = (opt.fw_densify and
+                          iteration < opt.densify_until_iter and
+                          iteration > opt.densify_from_iter and
+                          iteration % collect_every == 0)
+        need_fw_stats = should_collect
         render_pkg = render(
             viewpoint_cam,
             gaussians,
@@ -164,15 +196,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             bg,
             use_trained_exp=dataset.train_test_exp,
             separate_sh=SPARSE_ADAM_AVAILABLE,
-            return_aux=need_fw_stats
+            return_aux=False
         )
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         if viewpoint_cam.alpha_mask is not None:
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
-        if need_fw_stats:
-            image.retain_grad()
-
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
@@ -204,29 +233,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         with torch.no_grad():
             fw_mean = None
             fw_var = None
+            fw_denom = None
             if need_fw_stats:
-                residual_img = image.grad.detach()
-                tile_residual, tile_energy = compute_tile_moments(residual_img)
-                _, H, W = residual_img.shape
-                tiles_x = (W + 16 - 1) // 16
-                fw_mean = compute_fw_score(
-                    tile_residual,
-                    tile_energy,
-                    tiles_x,
-                    radii,
-                    render_pkg["geomBuffer"],
-                    render_pkg["binningBuffer"],
-                    3,
-                )
-                fw_var = compute_fw_score(
-                    tile_residual,
-                    tile_energy,
-                    tiles_x,
-                    radii,
-                    render_pkg["geomBuffer"],
-                    render_pkg["binningBuffer"],
-                    5,
-                )
+                fw_mean, fw_var, fw_denom = _adjoint_scores(viewpoint_cam, gaussians, pipe, image, gt_image)
 
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -249,15 +258,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 if opt.fw_densify:
                     if need_fw_stats:
-                        gaussians.add_fw_stats(fw_mean, fw_var, visibility_filter)
+                        gaussians.add_fw_stats(fw_mean, fw_var, fw_denom, visibility_filter)
                 else:
                     gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 if opt.fw_densify:
-                    denom_raw = gaussians.fw_denom
-                    denom = denom_raw.clamp_min(1.0)
-                    mean_scores = gaussians.fw_mean_accum / denom
-                    var_scores = gaussians.fw_var_accum / denom
+                    Z = gaussians.fw_denom
+                    M = gaussians.fw_mean_accum
+                    Q = gaussians.fw_var_accum
+                    eps = 1e-8
+                    mean_scores = M
+                    var_scores = (Q - (M * M) / (Z.clamp_min(eps))).clamp_min(0.0)
+                    var_scores = var_scores * gaussians.max_radii2D.clamp_min(1.0).unsqueeze(-1)
                 else:
                     denom_raw = gaussians.denom
                     denom = denom_raw.clamp_min(1.0)
@@ -270,13 +282,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 var_scores[var_scores.isnan()] = 0.0
                 if mean_scores.dim() == 1:
                     mean_norm = mean_scores.abs()
+                    mean_grads = mean_scores.unsqueeze(-1)
                 else:
                     mean_norm = torch.norm(mean_scores, dim=-1)
+                    mean_grads = mean_scores
                 if var_scores.dim() == 1:
                     var_norm = var_scores.abs()
+                    var_grads = var_scores.unsqueeze(-1)
                 else:
                     var_norm = torch.norm(var_scores, dim=-1)
-                denom_valid = denom_raw.squeeze() > 0
+                    var_grads = var_scores
+                denom_valid = gaussians.fw_denom.squeeze() > 0 if opt.fw_densify else (denom_raw.squeeze() > 0)
                 scale_max = gaussians.get_scaling.max(dim=1).values
                 clone_mask = scale_max <= gaussians.percent_dense * scene.cameras_extent
                 split_mask = scale_max > gaussians.percent_dense * scene.cameras_extent
@@ -370,11 +386,29 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     last_eff_topk_clone = used_topk_clone
                     last_eff_topk_split = used_topk_split
                     if opt.fw_densify:
-                        fw_mean_grads = gaussians.fw_mean_accum / gaussians.fw_denom.clamp_min(1.0)
-                        fw_var_grads = gaussians.fw_var_accum / gaussians.fw_denom.clamp_min(1.0)
-                        gaussians.densify_and_prune(thr_clone, 0.005, scene.cameras_extent, size_threshold, radii, grads_override=fw_mean_grads, grads_override_split=fw_var_grads, max_grad_split=thr_split)
+                        fw_mean_grads = mean_grads
+                        fw_var_grads = var_grads
+                        stats = gaussians.densify_and_prune(
+                            thr_clone,
+                            0.005,
+                            scene.cameras_extent,
+                            size_threshold,
+                            radii,
+                            grads_override=fw_mean_grads,
+                            grads_override_split=fw_var_grads,
+                            max_grad_split=thr_split,
+                        )
                     else:
-                        gaussians.densify_and_prune(base_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
+                        stats = gaussians.densify_and_prune(base_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
+
+                    if stats is not None:
+                        net = stats["after"] - stats["before"]
+                        msg = (
+                            f"[ITER {iteration}] densify added_clone={stats['added_clone']} "
+                            f"added_split={stats['added_split']} pruned={stats['pruned']} "
+                            f"net={net} points={stats['after']}"
+                        )
+                        _log_iter_stats(progress_bar, iter_log_path, msg)
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()

@@ -13,27 +13,51 @@ import torchvision
 
 from arguments import ModelParams, PipelineParams, OptimizationParams, get_combined_args
 from scene import Scene
-from gaussian_renderer import render, GaussianModel
+from gaussian_renderer import render, render_aux, GaussianModel
 from utils.graphics_utils import geom_transform_points
 from utils.loss_utils import l1_loss, ssim
 from utils.general_utils import safe_state
-
-try:
-    from diff_gaussian_rasterization import compute_tile_moments, compute_fw_score
-except Exception as exc:
-    raise RuntimeError("compute_tile_moments/compute_fw_score not available. Rebuild rasterizer.") from exc
 
 
 def ndc_to_pix(v, s):
     return ((v + 1.0) * s - 1.0) * 0.5
 
 
-def compute_fw_score_for_view(view, gaussians, pipe, opt, background):
-    render_pkg = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=False, return_aux=True)
+def _adjoint_phi(image, gt_image):
+    diff = (image.detach() - gt_image).abs()
+    return diff.sum(dim=0, keepdim=True)
+
+
+def _adjoint_scores(view, gaussians, pipe, background, image, gt_image):
+    phi_scalar = _adjoint_phi(image, gt_image)
+    phi = phi_scalar.repeat(3, 1, 1)
+    ones = torch.ones_like(phi)
+
+    def _grad_for(signal):
+        aux = torch.ones((gaussians.get_xyz.shape[0], 3), device="cuda", requires_grad=True)
+        aux_img = render_aux(view, gaussians, pipe, override_color=aux)["render"]
+        if view.alpha_mask is not None:
+            aux_img = aux_img * view.alpha_mask.cuda()
+        loss = (aux_img * signal).sum()
+        grad = torch.autograd.grad(loss, aux, retain_graph=False, create_graph=False, allow_unused=False)[0]
+        return grad.sum(dim=-1)
+
+    with torch.enable_grad():
+        M = _grad_for(phi)
+        Q = _grad_for(phi * phi)
+        Z = _grad_for(ones)
+
+    M = M.clamp_min(0.0)
+    Q = Q.clamp_min(0.0)
+    Z = Z.clamp_min(0.0)
+    return M, Q, Z
+
+
+def compute_adjoint_score_for_view(view, gaussians, pipe, opt, background):
+    render_pkg = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=False, return_aux=False)
     image = render_pkg["render"]
     if view.alpha_mask is not None:
         image = image * view.alpha_mask.cuda()
-    image.retain_grad()
 
     gt_image = view.original_image.cuda()
     Ll1 = l1_loss(image, gt_image)
@@ -41,13 +65,10 @@ def compute_fw_score_for_view(view, gaussians, pipe, opt, background):
     loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
     loss.backward()
 
-    residual_img = image.grad.detach()
-    tile_residual, tile_energy = compute_tile_moments(residual_img)
-    _, H, W = residual_img.shape
-    tiles_x = (W + 16 - 1) // 16
-    fw_score = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], opt.fw_norm_mode)
+    residual_img = (image.detach() - gt_image).abs()
+    M, Q, Z = _adjoint_scores(view, gaussians, pipe, background, image, gt_image)
 
-    return render_pkg, image.detach(), residual_img, fw_score
+    return render_pkg, image.detach(), residual_img, M, Q, Z
 
 
 def _default_args():
@@ -86,10 +107,19 @@ def _ensure_depths_available(dataset):
 
 def score_heatmap_sanity(scene, pipe, opt, background, topk, out_dir):
     view = random.choice(scene.getTrainCameras())
-    render_pkg, image, residual, fw_score = compute_fw_score_for_view(view, scene.gaussians, pipe, opt, background)
+    render_pkg, image, residual, M, Q, Z = compute_adjoint_score_for_view(view, scene.gaussians, pipe, opt, background)
 
-    topk = min(topk, fw_score.numel())
-    _, idxs = torch.topk(fw_score, k=topk, largest=True)
+    scale_max = scene.gaussians.get_scaling.max(dim=1).values
+    clone_mask = scale_max <= scene.gaussians.percent_dense * scene.cameras_extent
+    split_mask = scale_max > scene.gaussians.percent_dense * scene.cameras_extent
+    eps = 1e-8
+    clone_score = M
+    split_score = (Q - (M * M) / (Z.clamp_min(eps))).clamp_min(0.0)
+    split_score = split_score * render_pkg["radii"].clamp_min(1.0)
+    combined_score = torch.where(clone_mask, clone_score, split_score)
+
+    topk = min(topk, combined_score.numel())
+    _, idxs = torch.topk(combined_score, k=topk, largest=True)
 
     # Project to pixel coordinates
     xyz = scene.gaussians.get_xyz.detach()
@@ -122,8 +152,8 @@ def score_heatmap_sanity(scene, pipe, opt, background, topk, out_dir):
 
     return {
         "topk": topk,
-        "fw_score_mean": float(fw_score.mean().item()),
-        "fw_score_max": float(fw_score.max().item()),
+        "fw_score_mean": float(combined_score.mean().item()),
+        "fw_score_max": float(combined_score.max().item()),
     }
 
 
@@ -132,8 +162,14 @@ def topk_stability(scene, pipe, opt, background, topk):
     if len(views) < 2:
         return {"topk_overlap": 0.0}
     v1, v2 = random.sample(views, 2)
-    _, _, _, score1 = compute_fw_score_for_view(v1, scene.gaussians, pipe, opt, background)
-    _, _, _, score2 = compute_fw_score_for_view(v2, scene.gaussians, pipe, opt, background)
+    render1, _, _, M1, Q1, Z1 = compute_adjoint_score_for_view(v1, scene.gaussians, pipe, opt, background)
+    render2, _, _, M2, Q2, Z2 = compute_adjoint_score_for_view(v2, scene.gaussians, pipe, opt, background)
+    scale_max = scene.gaussians.get_scaling.max(dim=1).values
+    clone_mask = scale_max <= scene.gaussians.percent_dense * scene.cameras_extent
+    split_mask = scale_max > scene.gaussians.percent_dense * scene.cameras_extent
+    eps = 1e-8
+    score1 = torch.where(clone_mask, M1, (Q1 - (M1 * M1) / (Z1.clamp_min(eps))).clamp_min(0.0) * render1["radii"].clamp_min(1.0))
+    score2 = torch.where(clone_mask, M2, (Q2 - (M2 * M2) / (Z2.clamp_min(eps))).clamp_min(0.0) * render2["radii"].clamp_min(1.0))
     topk = min(topk, score1.numel(), score2.numel())
     idx1 = set(torch.topk(score1, k=topk).indices.tolist())
     idx2 = set(torch.topk(score2, k=topk).indices.tolist())
@@ -173,14 +209,11 @@ def densify_effect_test(dataset, pipe, opt, background, steps, use_fw):
             background,
             use_trained_exp=False,
             separate_sh=False,
-            return_aux=need_fw
+            return_aux=False
         )
         image = render_pkg["render"]
         if viewpoint_cam.alpha_mask is not None:
             image = image * viewpoint_cam.alpha_mask.cuda()
-        if need_fw:
-            image.retain_grad()
-
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         ssim_value = ssim(image, gt_image)
@@ -193,17 +226,18 @@ def densify_effect_test(dataset, pipe, opt, background, steps, use_fw):
                 render_pkg["radii"][render_pkg["visibility_filter"]]
             )
             if use_fw:
-                residual_img = image.grad.detach()
-                tile_residual, tile_energy = compute_tile_moments(residual_img)
-                _, H, W = residual_img.shape
-                tiles_x = (W + 16 - 1) // 16
-                fw_mean = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 3)
-                fw_var = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 5)
-                gaussians.add_fw_stats(fw_mean, fw_var, render_pkg["visibility_filter"])
-                fw_mean_grads = gaussians.fw_mean_accum / gaussians.fw_denom.clamp_min(1.0)
-                fw_var_grads = gaussians.fw_var_accum / gaussians.fw_denom.clamp_min(1.0)
-                mean_scores = fw_mean_grads.squeeze().abs()
-                var_scores = fw_var_grads.squeeze().abs()
+                fw_M, fw_Q, fw_Z = _adjoint_scores(viewpoint_cam, gaussians, pipe, background, image, gt_image)
+                gaussians.add_fw_stats(fw_M, fw_Q, fw_Z, render_pkg["visibility_filter"])
+                M = gaussians.fw_mean_accum
+                Q = gaussians.fw_var_accum
+                Z = gaussians.fw_denom
+                mean_scores = M.squeeze().abs()
+                var_scores = (Q - (M * M) / (Z.clamp_min(1e-8))).squeeze().clamp_min(0.0)
+                var_scores = var_scores * gaussians.max_radii2D.clamp_min(1.0)
+                fw_mean_grads = mean_scores.unsqueeze(-1)
+                fw_var_grads = var_scores.unsqueeze(-1)
+                fw_mean_grads = mean_scores
+                fw_var_grads = var_scores
                 scale_max = gaussians.get_scaling.max(dim=1).values
                 clone_mask = scale_max <= gaussians.percent_dense * scene.cameras_extent
                 split_mask = scale_max > gaussians.percent_dense * scene.cameras_extent
@@ -229,7 +263,16 @@ def densify_effect_test(dataset, pipe, opt, background, steps, use_fw):
                         thr_split = float(torch.topk(var_valid, topk_split, largest=True, sorted=True).values[-1].item())
                     else:
                         thr_split = float("-inf")
-                gaussians.densify_and_prune(thr_clone, 0.005, scene.cameras_extent, None, render_pkg["radii"], grads_override=fw_mean_grads, grads_override_split=fw_var_grads, max_grad_split=thr_split)
+                gaussians.densify_and_prune(
+                    thr_clone,
+                    0.005,
+                    scene.cameras_extent,
+                    None,
+                    render_pkg["radii"],
+                    grads_override=fw_mean_grads,
+                    grads_override_split=fw_var_grads,
+                    max_grad_split=thr_split
+                )
             else:
                 gaussians.add_densification_stats(render_pkg["viewspace_points"], render_pkg["visibility_filter"])
                 gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, None, render_pkg["radii"])

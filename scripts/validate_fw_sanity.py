@@ -12,15 +12,9 @@ import torch
 from arguments import ModelParams, PipelineParams, OptimizationParams, get_combined_args
 from scene import Scene
 from gaussian_renderer import GaussianModel
-from gaussian_renderer import render
+from gaussian_renderer import render, render_aux
 from utils.loss_utils import l1_loss, ssim
 from utils.general_utils import safe_state
-
-try:
-    from diff_gaussian_rasterization import compute_tile_moments, compute_fw_score
-except Exception as exc:
-    raise RuntimeError("compute_tile_moments/compute_fw_score not available. Rebuild rasterizer.") from exc
-
 
 def _default_args():
     default_parser = ArgumentParser(add_help=False)
@@ -50,6 +44,29 @@ def _ensure_depths_available(dataset):
         if not os.path.isfile(depth_params):
             print(f"Warning: depth_params.json not found at '{depth_params}'. Disabling depths.")
             dataset.depths = ""
+
+
+def _adjoint_phi(image, gt_image):
+    diff = (image.detach() - gt_image).abs()
+    return diff.sum(dim=0, keepdim=True)
+
+
+def _adjoint_score(view, gaussians, pipe, background, image, gt_image):
+    phi_scalar = _adjoint_phi(image, gt_image)
+    phi = phi_scalar.repeat(3, 1, 1)
+    def _grad_for(signal):
+        aux = torch.ones((gaussians.get_xyz.shape[0], 3), device="cuda", requires_grad=True)
+        aux_img = render_aux(view, gaussians, pipe, override_color=aux)["render"]
+        if view.alpha_mask is not None:
+            aux_img = aux_img * view.alpha_mask.cuda()
+        loss = (aux_img * signal).sum()
+        grad = torch.autograd.grad(loss, aux, retain_graph=False, create_graph=False, allow_unused=False)[0]
+        return grad.sum(dim=-1)
+
+    with torch.enable_grad():
+        M = _grad_for(phi)
+    score = M.clamp_min(0.0)
+    return score
 
 def _rankdata(x: torch.Tensor) -> torch.Tensor:
     # Simple rankdata (no tie handling). Good enough for sanity checks.
@@ -116,23 +133,17 @@ def main():
     for view in sel_views:
         _zero_grads(gaussians)
 
-        render_pkg = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=dataset.train_test_exp, return_aux=True)
+        render_pkg = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=dataset.train_test_exp, return_aux=False)
         image = render_pkg["render"]
         if view.alpha_mask is not None:
             image = image * view.alpha_mask.cuda()
-        image.retain_grad()
-
         gt_image = view.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         ssim_value = ssim(image, gt_image)
         loss = (1.0 - opt_args.lambda_dssim) * Ll1 + opt_args.lambda_dssim * (1.0 - ssim_value)
         loss.backward()
 
-        residual_img = image.grad.detach()
-        tile_residual, tile_energy = compute_tile_moments(residual_img)
-        _, H, W = residual_img.shape
-        tiles_x = (W + 16 - 1) // 16
-        fw_score = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], opt.fw_norm_mode)
+        fw_score = _adjoint_score(view, gaussians, pipe, background, image, gt_image)
 
         feat_dc = gaussians._features_dc.grad
         feat_rest = gaussians._features_rest.grad

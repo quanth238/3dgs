@@ -12,14 +12,9 @@ import torch.nn as nn
 
 from arguments import ModelParams, PipelineParams, OptimizationParams, get_combined_args
 from scene import Scene
-from gaussian_renderer import render, GaussianModel
+from gaussian_renderer import render, render_aux, GaussianModel
 from utils.loss_utils import l1_loss, ssim
 from utils.general_utils import safe_state
-
-try:
-    from diff_gaussian_rasterization import compute_tile_moments, compute_fw_score
-except Exception as exc:
-    raise RuntimeError("compute_tile_moments/compute_fw_score not available. Rebuild rasterizer.") from exc
 
 
 def _default_args():
@@ -90,30 +85,49 @@ def _ensure_exposure(gaussians, scene):
     gaussians._exposure = nn.Parameter(exposure.requires_grad_(True))
 
 
+def _adjoint_phi(image, gt_image):
+    diff = (image.detach() - gt_image).abs()
+    return diff.sum(dim=0, keepdim=True)
+
+
+def _adjoint_scores(view, gaussians, pipe, background, image, gt_image):
+    phi_scalar = _adjoint_phi(image, gt_image)
+    phi = phi_scalar.repeat(3, 1, 1)
+    ones = torch.ones_like(phi)
+
+    def _grad_for(signal):
+        aux = torch.ones((gaussians.get_xyz.shape[0], 3), device="cuda", requires_grad=True)
+        aux_img = render_aux(view, gaussians, pipe, override_color=aux)["render"]
+        if view.alpha_mask is not None:
+            aux_img = aux_img * view.alpha_mask.cuda()
+        loss = (aux_img * signal).sum()
+        grad = torch.autograd.grad(loss, aux, retain_graph=False, create_graph=False, allow_unused=False)[0]
+        return grad.sum(dim=-1)
+
+    with torch.enable_grad():
+        M = _grad_for(phi)
+        Q = _grad_for(phi * phi)
+        Z = _grad_for(ones)
+
+    M = M.clamp_min(0.0)
+    Q = Q.clamp_min(0.0)
+    Z = Z.clamp_min(0.0)
+    return M, Q, Z
+
+
 def compute_scores(view, gaussians, pipe, opt, background):
     _zero_grads(gaussians)
-    render_pkg = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=False, return_aux=True)
+    render_pkg = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=False, return_aux=False)
     image = render_pkg["render"]
     if view.alpha_mask is not None:
         image = image * view.alpha_mask.cuda()
-    image.retain_grad()
-
     gt_image = view.original_image.cuda()
     Ll1 = l1_loss(image, gt_image)
     ssim_value = ssim(image, gt_image)
     loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
     loss.backward()
 
-    residual_grad = image.grad.detach()
-    residual_abs = (image.detach() - gt_image).abs()
-
-    tile_grad, tile_grad_energy = compute_tile_moments(residual_grad)
-    tile_abs, tile_abs_energy = compute_tile_moments(residual_abs)
-    _, H, W = residual_grad.shape
-    tiles_x = (W + 16 - 1) // 16
-
-    fw_score = compute_fw_score(tile_grad, tile_grad_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], opt.fw_norm_mode)
-    abs_score = compute_fw_score(tile_abs, tile_abs_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], opt.fw_norm_mode)
+    M, Q, Z = _adjoint_scores(view, gaussians, pipe, background, image, gt_image)
     mean2d_score = torch.norm(render_pkg["viewspace_points"].grad[:, :2], dim=-1)
 
     feat_dc = gaussians._features_dc.grad
@@ -123,8 +137,8 @@ def compute_scores(view, gaussians, pipe, opt, background):
     return {
         "render_pkg": render_pkg,
         "loss": float(loss.item()),
-        "fw_score": fw_score,
-        "abs_score": abs_score,
+        "adjoint_score": M,
+        "split_score": (Q - (M * M) / (Z.clamp_min(1e-8))).clamp_min(0.0) * render_pkg["radii"].clamp_min(1.0),
         "mean2d_score": mean2d_score,
         "feat_grad": feat_grad,
     }
@@ -212,9 +226,8 @@ def main():
     cand_idx = visible_idx[torch.randperm(visible_idx.numel())[:num_candidates]]
 
     method_scores = {
-        "fw": scores["fw_score"][cand_idx],
+        "adjoint": scores["adjoint_score"][cand_idx],
         "mean2d": scores["mean2d_score"][cand_idx],
-        "abs": scores["abs_score"][cand_idx],
     }
 
     results = {
@@ -223,9 +236,8 @@ def main():
         "topk": int(args.topk),
         "inner_steps": int(args.inner_steps),
         "corr_score_featgrad": {
-            "fw": _spearman(scores["fw_score"][cand_idx], scores["feat_grad"][cand_idx]),
+            "adjoint": _spearman(scores["adjoint_score"][cand_idx], scores["feat_grad"][cand_idx]),
             "mean2d": _spearman(scores["mean2d_score"][cand_idx], scores["feat_grad"][cand_idx]),
-            "abs": _spearman(scores["abs_score"][cand_idx], scores["feat_grad"][cand_idx]),
         },
         "mean_gain_topk": {},
         "corr_score_gain": {},

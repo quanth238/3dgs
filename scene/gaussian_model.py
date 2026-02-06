@@ -514,6 +514,7 @@ class GaussianModel:
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii, grads_override=None, grads_override_split=None, max_grad_split=None):
+        n_before = int(self.get_xyz.shape[0])
         if grads_override is None:
             grads_clone = self.xyz_gradient_accum / self.denom
         else:
@@ -528,7 +529,9 @@ class GaussianModel:
 
         self.tmp_radii = radii
         self.densify_and_clone(grads_clone, max_grad, extent)
+        n_after_clone = int(self.get_xyz.shape[0])
         self.densify_and_split(grads_split, max_grad_split if max_grad_split is not None else max_grad, extent)
+        n_after_split = int(self.get_xyz.shape[0])
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
@@ -536,20 +539,32 @@ class GaussianModel:
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
+        n_after_prune = int(self.get_xyz.shape[0])
         tmp_radii = self.tmp_radii
         self.tmp_radii = None
 
         torch.cuda.empty_cache()
+        stats = {
+            "before": n_before,
+            "added_clone": n_after_clone - n_before,
+            "added_split": n_after_split - n_after_clone,
+            "pruned": n_after_split - n_after_prune,
+            "after": n_after_prune,
+        }
+        self.last_densify_stats = stats
+        return stats
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
 
-    def add_fw_stats(self, fw_mean, fw_var, update_filter):
+    def add_fw_stats(self, fw_mean, fw_var, fw_denom, update_filter):
         if fw_mean.dim() == 1:
             fw_mean = fw_mean.unsqueeze(-1)
         if fw_var.dim() == 1:
             fw_var = fw_var.unsqueeze(-1)
+        if fw_denom.dim() == 1:
+            fw_denom = fw_denom.unsqueeze(-1)
         self.fw_mean_accum[update_filter] += fw_mean[update_filter]
         self.fw_var_accum[update_filter] += fw_var[update_filter]
-        self.fw_denom[update_filter] += 1
+        self.fw_denom[update_filter] += fw_denom[update_filter]

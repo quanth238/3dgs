@@ -11,14 +11,9 @@ import torch
 
 from arguments import ModelParams, PipelineParams, OptimizationParams, get_combined_args
 from scene import Scene
-from gaussian_renderer import render, GaussianModel
+from gaussian_renderer import render, render_aux, GaussianModel
 from utils.loss_utils import l1_loss, ssim
 from utils.general_utils import safe_state
-
-try:
-    from diff_gaussian_rasterization import compute_tile_moments, compute_fw_score
-except Exception as exc:
-    raise RuntimeError("compute_tile_moments/compute_fw_score not available. Rebuild rasterizer.") from exc
 
 
 def _default_args():
@@ -49,6 +44,21 @@ def _ensure_depths_available(dataset):
         if not os.path.isfile(depth_params):
             print(f"Warning: depth_params.json not found at '{depth_params}'. Disabling depths.")
             dataset.depths = ""
+
+
+def _adjoint_phi(image, gt_image):
+    diff = (image.detach() - gt_image).abs()
+    return diff.sum(dim=0, keepdim=True)
+
+
+def _adjoint_grad(view, gaussians, pipe, background, signal):
+    aux = torch.ones((gaussians.get_xyz.shape[0], 3), device="cuda", requires_grad=True)
+    aux_img = render_aux(view, gaussians, pipe, override_color=aux)["render"]
+    if view.alpha_mask is not None:
+        aux_img = aux_img * view.alpha_mask.cuda()
+    loss = (aux_img * signal).sum()
+    grad = torch.autograd.grad(loss, aux, retain_graph=False, create_graph=False, allow_unused=False)[0]
+    return grad.sum(dim=-1)
 
 
 def main():
@@ -83,27 +93,26 @@ def main():
 
     views = scene.getTrainCameras()
     total_fw = 0.0
-    total_tile = 0.0
-    total_fw_mean = 0.0
-    total_fw_var = 0.0
+    total_adj_m = 0.0
+    total_adj_q = 0.0
+    total_adj_z = 0.0
     total_core = 0.0
 
     # Warmup
     view = random.choice(views)
-    render_pkg = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=False, return_aux=True)
+    render_pkg = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=False, return_aux=False)
     image = render_pkg["render"]
     if view.alpha_mask is not None:
         image = image * view.alpha_mask.cuda()
-    image.retain_grad()
     gt_image = view.original_image.cuda()
     loss = (1.0 - opt_args.lambda_dssim) * l1_loss(image, gt_image) + opt_args.lambda_dssim * (1.0 - ssim(image, gt_image))
     loss.backward()
-    residual_img = image.grad.detach()
-    tile_residual, tile_energy = compute_tile_moments(residual_img)
-    _, H, W = residual_img.shape
-    tiles_x = (W + 16 - 1) // 16
-    _ = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 3)
-    _ = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 5)
+    phi_scalar = _adjoint_phi(image, gt_image)
+    phi = phi_scalar.repeat(3, 1, 1)
+    ones = torch.ones_like(phi)
+    _ = _adjoint_grad(view, gaussians, pipe, background, phi)
+    _ = _adjoint_grad(view, gaussians, pipe, background, phi * phi)
+    _ = _adjoint_grad(view, gaussians, pipe, background, ones)
     torch.cuda.synchronize()
 
     for _ in range(args.iters):
@@ -112,11 +121,10 @@ def main():
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        render_pkg = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=False, return_aux=True)
+        render_pkg = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=False, return_aux=False)
         image = render_pkg["render"]
         if view.alpha_mask is not None:
             image = image * view.alpha_mask.cuda()
-        image.retain_grad()
         gt_image = view.original_image.cuda()
         loss = (1.0 - opt_args.lambda_dssim) * l1_loss(image, gt_image) + opt_args.lambda_dssim * (1.0 - ssim(image, gt_image))
         loss.backward()
@@ -124,53 +132,48 @@ def main():
         torch.cuda.synchronize()
         total_core += start.elapsed_time(end)
 
-        # Tile moments
+        phi_scalar = _adjoint_phi(image, gt_image)
+        phi = phi_scalar.repeat(3, 1, 1)
+        ones = torch.ones_like(phi)
+
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        residual_img = image.grad.detach()
-        tile_residual, tile_energy = compute_tile_moments(residual_img)
+        _ = _adjoint_grad(view, gaussians, pipe, background, phi)
         end.record()
         torch.cuda.synchronize()
-        total_tile += start.elapsed_time(end)
+        total_adj_m += start.elapsed_time(end)
 
-        _, H, W = residual_img.shape
-        tiles_x = (W + 16 - 1) // 16
-
-        # Mean score (clone)
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        _ = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 3)
+        _ = _adjoint_grad(view, gaussians, pipe, background, phi * phi)
         end.record()
         torch.cuda.synchronize()
-        total_fw_mean += start.elapsed_time(end)
+        total_adj_q += start.elapsed_time(end)
 
-        # Variance score (split)
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        _ = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 5)
+        _ = _adjoint_grad(view, gaussians, pipe, background, ones)
         end.record()
         torch.cuda.synchronize()
-        total_fw_var += start.elapsed_time(end)
-
-        # total_fw computed from components after loop
+        total_adj_z += start.elapsed_time(end)
 
     avg_core = total_core / args.iters
-    avg_tile = total_tile / args.iters
-    avg_fw_mean = total_fw_mean / args.iters
-    avg_fw_var = total_fw_var / args.iters
-    avg_fw = avg_tile + avg_fw_mean + avg_fw_var
-    ratio = avg_fw / max(1e-6, avg_core)
+    avg_adj_m = total_adj_m / args.iters
+    avg_adj_q = total_adj_q / args.iters
+    avg_adj_z = total_adj_z / args.iters
+    avg_adj = avg_adj_m + avg_adj_q + avg_adj_z
+    ratio = avg_adj / max(1e-6, avg_core)
 
     results = {
         "iters": args.iters,
         "avg_core_ms": avg_core,
-        "avg_tile_moments_ms": avg_tile,
-        "avg_fw_mean_ms": avg_fw_mean,
-        "avg_fw_var_ms": avg_fw_var,
-        "avg_fw_ms": avg_fw,
+        "avg_adj_m_ms": avg_adj_m,
+        "avg_adj_q_ms": avg_adj_q,
+        "avg_adj_z_ms": avg_adj_z,
+        "avg_adj_ms": avg_adj,
         "fw_overhead_ratio": ratio,
     }
 

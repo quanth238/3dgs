@@ -1,0 +1,17 @@
+{
+  "spearman_fw_vs_featgrad": [
+    0.26000240445137024
+  ],
+  "spearman_mean2d_vs_featgrad": [
+    0.6509878635406494
+  ],
+  "fw_score_mean": [
+    0.0003422953886911273
+  ],
+  "featgrad_mean": [
+    0.0001000843767542392
+  ],
+  "mean2dgrad_mean": [
+    1.0264941920468118e-05
+  ]
+}

@@ -1,74 +1,107 @@
-[ITER 200] points=54275 sel=0 (0.0000) valid=0 (0.0000) clone=0 split=0 thr=0.000200 p90=0.000000 p95=0.000000 p99=0.000000 mem_alloc=0.09G mem_reserved=0.35G
-[ITER 400] points=54275 sel=0 (0.0000) valid=0 (0.0000) clone=0 split=0 thr=0.000200 p90=0.000000 p95=0.000000 p99=0.000000 mem_alloc=0.09G mem_reserved=0.38G
-[ITER 600] points=54275 sel=0 (0.0000) valid=24458 (0.4506) clone=0 split=0 thr=0.000200 p90=0.000048 p95=0.000050 p99=0.000053 mem_alloc=0.16G mem_reserved=0.38G
-[ITER 800] points=54683 sel=0 (0.0000) valid=13644 (0.2495) clone=0 split=0 thr=0.000058 topk=168 p90=0.000042 p95=0.000046 p99=0.000051 mem_alloc=0.14G mem_reserved=0.36G
-[ITER 1000] points=55051 sel=2 (0.0000) valid=18562 (0.3372) clone=1 split=1 thr=0.000058 topk=241 p90=0.000048 p95=0.000051 p99=0.000055 mem_alloc=0.15G mem_reserved=0.37G
-[ITER 1200] points=55437 sel=75 (0.0014) valid=19909 (0.3591) clone=29 split=46 thr=0.000058 topk=213 p90=0.000053 p95=0.000055 p99=0.000057 mem_alloc=0.15G mem_reserved=0.38G
-[ITER 1400] points=55864 sel=1414 (0.0253) valid=25501 (0.4565) clone=703 split=711 thr=0.000057 topk=247 p90=0.000055 p95=0.000057 p99=0.000060 mem_alloc=0.15G mem_reserved=0.41G
-[ITER 1600] points=56350 sel=18 (0.0003) valid=20229 (0.3590) clone=11 split=7 thr=0.000057 topk=257 p90=0.000043 p95=0.000047 p99=0.000052 mem_alloc=0.15G mem_reserved=0.37G
-[ITER 1800] points=56694 sel=0 (0.0000) valid=19783 (0.3489) clone=0 split=0 thr=0.000060 topk=172 p90=0.000046 p95=0.000049 p99=0.000053 mem_alloc=0.16G mem_reserved=0.35G
-[ITER 2000] points=57040 sel=1 (0.0000) valid=6823 (0.1196) clone=1 split=0 thr=0.000056 topk=182 p90=0.000042 p95=0.000045 p99=0.000050 mem_alloc=0.14G mem_reserved=0.41G
-[ITER 2200] points=57299 sel=213 (0.0037) valid=20983 (0.3662) clone=141 split=72 thr=0.000054 topk=225 p90=0.000047 p95=0.000050 p99=0.000054 mem_alloc=0.17G mem_reserved=0.43G
-[ITER 2400] points=57589 sel=322 (0.0056) valid=13751 (0.2388) clone=43 split=279 thr=0.000048 topk=123 p90=0.000041 p95=0.000045 p99=0.000052 mem_alloc=0.16G mem_reserved=0.42G
-[ITER 2600] points=57894 sel=208 (0.0036) valid=27042 (0.4671) clone=114 split=94 thr=0.000056 topk=197 p90=0.000050 p95=0.000052 p99=0.000055 mem_alloc=0.16G mem_reserved=0.43G
-[ITER 2800] points=58336 sel=181 (0.0031) valid=31614 (0.5419) clone=108 split=73 thr=0.000056 topk=206 p90=0.000045 p95=0.000048 p99=0.000054 mem_alloc=0.17G mem_reserved=0.50G
-[ITER 3000] points=58814 sel=42 (0.0007) valid=18705 (0.3180) clone=6 split=36 thr=0.000055 topk=181 p90=0.000043 p95=0.000047 p99=0.000052 mem_alloc=0.16G mem_reserved=0.40G
-[ITER 3200] points=51048 sel=2911 (0.0570) valid=17183 (0.3366) clone=1012 split=1899 thr=0.000050 topk=77 p90=0.000053 p95=0.000055 p99=0.000058 mem_alloc=0.14G mem_reserved=0.45G
-[ITER 3400] points=48826 sel=1082 (0.0222) valid=23285 (0.4769) clone=465 split=617 thr=0.000054 topk=155 p90=0.000052 p95=0.000054 p99=0.000057 mem_alloc=0.14G mem_reserved=0.41G
-[ITER 3600] points=47978 sel=533 (0.0111) valid=24680 (0.5144) clone=236 split=297 thr=0.000051 topk=202 p90=0.000047 p95=0.000050 p99=0.000053 mem_alloc=0.15G mem_reserved=0.32G
-[ITER 3800] points=47514 sel=85 (0.0018) valid=27931 (0.5878) clone=66 split=19 thr=0.000055 topk=264 p90=0.000048 p95=0.000050 p99=0.000053 mem_alloc=0.15G mem_reserved=0.36G
-[ITER 4000] points=47170 sel=4 (0.0001) valid=23903 (0.5067) clone=4 split=0 thr=0.000055 topk=137 p90=0.000047 p95=0.000049 p99=0.000052 mem_alloc=0.15G mem_reserved=0.44G
-[ITER 4200] points=46797 sel=968 (0.0207) valid=27000 (0.5770) clone=596 split=372 thr=0.000048 topk=92 p90=0.000045 p95=0.000047 p99=0.000051 mem_alloc=0.15G mem_reserved=0.39G
-[ITER 4400] points=46420 sel=345 (0.0074) valid=5545 (0.1195) clone=121 split=224 thr=0.000042 topk=5 p90=0.000038 p95=0.000043 p99=0.000050 mem_alloc=0.12G mem_reserved=0.40G
-[ITER 4600] points=46315 sel=1836 (0.0396) valid=28874 (0.6234) clone=930 split=906 thr=0.000051 topk=301 p90=0.000049 p95=0.000051 p99=0.000055 mem_alloc=0.15G mem_reserved=0.33G
-[ITER 4800] points=46360 sel=124 (0.0027) valid=13588 (0.2931) clone=42 split=82 thr=0.000051 topk=264 p90=0.000041 p95=0.000045 p99=0.000051 mem_alloc=0.14G mem_reserved=0.37G
-[ITER 5000] points=46287 sel=83 (0.0018) valid=23888 (0.5161) clone=62 split=21 thr=0.000054 topk=223 p90=0.000047 p95=0.000049 p99=0.000052 mem_alloc=0.15G mem_reserved=0.36G
-[ITER 5200] points=46107 sel=41 (0.0009) valid=5681 (0.1232) clone=25 split=16 thr=0.000052 topk=46 p90=0.000041 p95=0.000046 p99=0.000051 mem_alloc=0.12G mem_reserved=0.51G
-[ITER 5400] points=45990 sel=192 (0.0042) valid=20794 (0.4521) clone=141 split=51 thr=0.000054 topk=244 p90=0.000048 p95=0.000051 p99=0.000054 mem_alloc=0.15G mem_reserved=0.36G
-[ITER 5600] points=46023 sel=91 (0.0020) valid=9822 (0.2134) clone=60 split=31 thr=0.000052 topk=224 p90=0.000041 p95=0.000046 p99=0.000052 mem_alloc=0.13G mem_reserved=0.32G
-[ITER 5800] points=45902 sel=280 (0.0061) valid=19840 (0.4322) clone=90 split=190 thr=0.000053 topk=159 p90=0.000042 p95=0.000047 p99=0.000054 mem_alloc=0.14G mem_reserved=0.47G
-[ITER 6000] points=45886 sel=200 (0.0044) valid=25060 (0.5461) clone=100 split=100 thr=0.000052 topk=146 p90=0.000046 p95=0.000049 p99=0.000052 mem_alloc=0.15G mem_reserved=0.33G
-[ITER 6200] points=42960 sel=230 (0.0054) valid=22627 (0.5267) clone=139 split=91 thr=0.000053 topk=118 p90=0.000048 p95=0.000050 p99=0.000053 mem_alloc=0.15G mem_reserved=0.43G
-[ITER 6400] points=42768 sel=0 (0.0000) valid=11332 (0.2650) clone=0 split=0 thr=0.000200 p90=0.000045 p95=0.000050 p99=0.000056 mem_alloc=0.13G mem_reserved=0.40G
-[ITER 6600] points=42781 sel=781 (0.0183) valid=14761 (0.3450) clone=349 split=432 thr=0.000052 topk=270 p90=0.000050 p95=0.000052 p99=0.000056 mem_alloc=0.13G mem_reserved=0.35G
-[ITER 6800] points=42779 sel=0 (0.0000) valid=5457 (0.1276) clone=0 split=0 thr=0.000054 topk=212 p90=0.000032 p95=0.000037 p99=0.000044 mem_alloc=0.12G mem_reserved=0.37G
-[ITER 7000] points=42810 sel=277 (0.0065) valid=10544 (0.2463) clone=115 split=162 thr=0.000054 topk=268 p90=0.000049 p95=0.000052 p99=0.000055 mem_alloc=0.12G mem_reserved=0.19G
-[ITER 7200] points=42604 sel=2990 (0.0702) valid=12336 (0.2896) clone=1177 split=1813 thr=0.000044 topk=7 p90=0.000049 p95=0.000052 p99=0.000057 mem_alloc=0.13G mem_reserved=0.36G
-[ITER 7400] points=42740 sel=1202 (0.0281) valid=9252 (0.2165) clone=334 split=868 thr=0.000050 topk=288 p90=0.000051 p95=0.000053 p99=0.000056 mem_alloc=0.13G mem_reserved=0.32G
-[ITER 7600] points=42749 sel=75 (0.0018) valid=8609 (0.2014) clone=51 split=24 thr=0.000052 topk=181 p90=0.000040 p95=0.000045 p99=0.000052 mem_alloc=0.13G mem_reserved=0.36G
-[ITER 7800] points=42653 sel=384 (0.0090) valid=11500 (0.2696) clone=190 split=194 thr=0.000054 topk=92 p90=0.000050 p95=0.000053 p99=0.000056 mem_alloc=0.13G mem_reserved=0.33G
-[ITER 8000] points=42766 sel=199 (0.0047) valid=16692 (0.3903) clone=108 split=91 thr=0.000052 topk=247 p90=0.000038 p95=0.000043 p99=0.000052 mem_alloc=0.13G mem_reserved=0.28G
-[ITER 8200] points=42796 sel=23 (0.0005) valid=23191 (0.5419) clone=17 split=6 thr=0.000057 topk=115 p90=0.000040 p95=0.000045 p99=0.000051 mem_alloc=0.15G mem_reserved=0.48G
-[ITER 8400] points=43062 sel=913 (0.0212) valid=19122 (0.4441) clone=197 split=716 thr=0.000051 topk=267 p90=0.000048 p95=0.000051 p99=0.000054 mem_alloc=0.15G mem_reserved=0.41G
-[ITER 8600] points=43195 sel=330 (0.0076) valid=17559 (0.4065) clone=238 split=92 thr=0.000055 topk=178 p90=0.000051 p95=0.000053 p99=0.000057 mem_alloc=0.15G mem_reserved=0.42G
-[ITER 8800] points=43207 sel=240 (0.0056) valid=22173 (0.5132) clone=177 split=63 thr=0.000057 topk=92 p90=0.000048 p95=0.000051 p99=0.000057 mem_alloc=0.14G mem_reserved=0.45G
-[ITER 9000] points=43423 sel=0 (0.0000) valid=30 (0.0007) clone=0 split=0 thr=0.000055 topk=171 p90=0.000021 p95=0.000024 p99=0.000026 mem_alloc=0.12G mem_reserved=0.40G
-[ITER 9200] points=42297 sel=168 (0.0040) valid=21607 (0.5108) clone=84 split=84 thr=0.000055 topk=155 p90=0.000045 p95=0.000049 p99=0.000055 mem_alloc=0.16G mem_reserved=0.53G
-[ITER 9400] points=42336 sel=7 (0.0002) valid=22681 (0.5357) clone=7 split=0 thr=0.000058 topk=125 p90=0.000049 p95=0.000052 p99=0.000055 mem_alloc=0.15G mem_reserved=0.37G
-[ITER 9600] points=42553 sel=119 (0.0028) valid=18321 (0.4305) clone=62 split=57 thr=0.000056 topk=275 p90=0.000042 p95=0.000050 p99=0.000055 mem_alloc=0.14G mem_reserved=0.44G
-[ITER 9800] points=42722 sel=180 (0.0042) valid=12730 (0.2980) clone=75 split=105 thr=0.000052 topk=224 p90=0.000039 p95=0.000044 p99=0.000054 mem_alloc=0.14G mem_reserved=0.40G
-[ITER 10000] points=42901 sel=335 (0.0078) valid=9329 (0.2175) clone=174 split=161 thr=0.000050 topk=303 p90=0.000035 p95=0.000043 p99=0.000054 mem_alloc=0.13G mem_reserved=0.35G
-[ITER 10200] points=43007 sel=15 (0.0003) valid=12147 (0.2824) clone=9 split=6 thr=0.000056 topk=240 p90=0.000049 p95=0.000051 p99=0.000054 mem_alloc=0.13G mem_reserved=0.33G
-[ITER 10400] points=43048 sel=4674 (0.1086) valid=22535 (0.5235) clone=2340 split=2334 thr=0.000047 topk=131 p90=0.000050 p95=0.000052 p99=0.000054 mem_alloc=0.15G mem_reserved=0.36G
-[ITER 10600] points=43365 sel=38 (0.0009) valid=29740 (0.6858) clone=27 split=11 thr=0.000055 topk=289 p90=0.000044 p95=0.000047 p99=0.000052 mem_alloc=0.16G mem_reserved=0.33G
-[ITER 10800] points=43634 sel=9 (0.0002) valid=25836 (0.5921) clone=6 split=3 thr=0.000056 topk=176 p90=0.000046 p95=0.000048 p99=0.000051 mem_alloc=0.16G mem_reserved=0.42G
-[ITER 11000] points=43878 sel=0 (0.0000) valid=10792 (0.2460) clone=0 split=0 thr=0.000057 topk=185 p90=0.000033 p95=0.000037 p99=0.000045 mem_alloc=0.13G mem_reserved=0.40G
-[ITER 11200] points=43993 sel=140 (0.0032) valid=20775 (0.4722) clone=55 split=85 thr=0.000055 topk=237 p90=0.000045 p95=0.000049 p99=0.000054 mem_alloc=0.15G mem_reserved=0.47G
-[ITER 11400] points=44155 sel=0 (0.0000) valid=5710 (0.1293) clone=0 split=0 thr=0.000056 topk=148 p90=0.000031 p95=0.000035 p99=0.000044 mem_alloc=0.12G mem_reserved=0.42G
-[ITER 11600] points=44256 sel=0 (0.0000) valid=5191 (0.1173) clone=0 split=0 thr=0.000055 topk=232 p90=0.000038 p95=0.000042 p99=0.000048 mem_alloc=0.12G mem_reserved=0.46G
-[ITER 11800] points=44356 sel=254 (0.0057) valid=27311 (0.6157) clone=149 split=105 thr=0.000053 topk=229 p90=0.000046 p95=0.000048 p99=0.000052 mem_alloc=0.15G mem_reserved=0.41G
-[ITER 12000] points=44672 sel=790 (0.0177) valid=29081 (0.6510) clone=564 split=226 thr=0.000051 topk=268 p90=0.000045 p95=0.000048 p99=0.000056 mem_alloc=0.16G mem_reserved=0.36G
-[ITER 12200] points=44133 sel=27 (0.0006) valid=26039 (0.5900) clone=20 split=7 thr=0.000055 topk=264 p90=0.000045 p95=0.000047 p99=0.000051 mem_alloc=0.16G mem_reserved=0.32G
-[ITER 12400] points=44314 sel=651 (0.0147) valid=19019 (0.4292) clone=365 split=286 thr=0.000055 topk=140 p90=0.000049 p95=0.000053 p99=0.000057 mem_alloc=0.14G mem_reserved=0.52G
-[ITER 12600] points=44540 sel=0 (0.0000) valid=12754 (0.2863) clone=0 split=0 thr=0.000056 topk=239 p90=0.000029 p95=0.000035 p99=0.000046 mem_alloc=0.14G mem_reserved=0.41G
-[ITER 12800] points=44504 sel=3928 (0.0883) valid=19103 (0.4292) clone=2040 split=1888 thr=0.000044 topk=32 p90=0.000049 p95=0.000054 p99=0.000057 mem_alloc=0.14G mem_reserved=0.38G
-[ITER 13000] points=44683 sel=19 (0.0004) valid=28170 (0.6304) clone=7 split=12 thr=0.000055 topk=181 p90=0.000043 p95=0.000046 p99=0.000050 mem_alloc=0.17G mem_reserved=0.37G
-[ITER 13200] points=44868 sel=530 (0.0118) valid=15116 (0.3369) clone=216 split=314 thr=0.000051 topk=91 p90=0.000046 p95=0.000050 p99=0.000054 mem_alloc=0.14G mem_reserved=0.41G
-[ITER 13400] points=45068 sel=2 (0.0000) valid=9219 (0.2046) clone=0 split=2 thr=0.000055 topk=240 p90=0.000033 p95=0.000039 p99=0.000050 mem_alloc=0.13G mem_reserved=0.45G
-[ITER 13600] points=45137 sel=600 (0.0133) valid=29246 (0.6479) clone=439 split=161 thr=0.000052 topk=232 p90=0.000045 p95=0.000048 p99=0.000055 mem_alloc=0.17G mem_reserved=0.42G
-[ITER 13800] points=45443 sel=1230 (0.0271) valid=17403 (0.3830) clone=670 split=560 thr=0.000051 topk=244 p90=0.000049 p95=0.000052 p99=0.000057 mem_alloc=0.14G mem_reserved=0.37G
-[ITER 14000] points=45426 sel=375 (0.0083) valid=10220 (0.2250) clone=263 split=112 thr=0.000038 topk=20 p90=0.000032 p95=0.000036 p99=0.000044 mem_alloc=0.14G mem_reserved=0.56G
-[ITER 14200] points=45472 sel=0 (0.0000) valid=2078 (0.0457) clone=0 split=0 thr=0.000055 topk=144 p90=0.000025 p95=0.000029 p99=0.000036 mem_alloc=0.12G mem_reserved=0.62G
-[ITER 14400] points=45411 sel=67 (0.0015) valid=22292 (0.4909) clone=53 split=14 thr=0.000058 topk=126 p90=0.000047 p95=0.000051 p99=0.000056 mem_alloc=0.16G mem_reserved=0.42G
-[ITER 14600] points=45596 sel=619 (0.0136) valid=27451 (0.6020) clone=449 split=170 thr=0.000053 topk=179 p90=0.000047 p95=0.000050 p99=0.000054 mem_alloc=0.16G mem_reserved=0.46G
-[ITER 14800] points=45782 sel=46 (0.0010) valid=11874 (0.2594) clone=36 split=10 thr=0.000058 topk=147 p90=0.000050 p95=0.000052 p99=0.000056 mem_alloc=0.13G mem_reserved=0.42G
+[ITER 200] points=54275 sel=0 (0.0000) valid=0 (0.0000) clone=0 split=0 thr_c=0.000200 thr_s=0.000200 p90=0.000000 p95=0.000000 p99=0.000000 mem_alloc=3.11G mem_reserved=3.35G
+[ITER 400] points=54275 sel=0 (0.0000) valid=0 (0.0000) clone=0 split=0 thr_c=0.000200 thr_s=0.000200 p90=0.000000 p95=0.000000 p99=0.000000 mem_alloc=3.11G mem_reserved=3.38G
+[ITER 600] points=54275 sel=40918 (0.7539) valid=40932 (0.7542) clone=19905 split=21013 thr_c=0.000200 thr_s=0.000200 p90=1126.319092 p95=4356.918945 p99=60468.355469 mem_alloc=3.11G mem_reserved=3.38G
+[ITER 600] densify added_clone=1991 added_split=2101 pruned=1 net=4091 points=58366
+[ITER 700] densify added_clone=1531 added_split=2631 pruned=37 net=4125 points=62491
+[ITER 800] points=62491 sel=5566 (0.0891) valid=47527 (0.7605) clone=3208 split=2358 thr_c=46.390800 topk_c=1531 thr_s=2584.599121 topk_s=2631 p90=853.103638 p95=2552.618164 p99=28533.062500 mem_alloc=3.12G mem_reserved=3.45G
+[ITER 800] densify added_clone=2358 added_split=2394 pruned=37 net=4715 points=67206
+[ITER 900] densify added_clone=2542 added_split=2695 pruned=45 net=5192 points=72398
+[ITER 1000] points=72398 sel=3488 (0.0482) valid=55825 (0.7711) clone=1269 split=2219 thr_c=63.249199 topk_c=2542 thr_s=2528.761475 topk_s=2695 p90=686.067078 p95=1872.335938 p99=18002.609375 mem_alloc=3.13G mem_reserved=3.38G
+[ITER 1000] densify added_clone=2860 added_split=2722 pruned=37 net=5545 points=77943
+[ITER 1100] densify added_clone=3192 added_split=2058 pruned=23 net=5227 points=83170
+[ITER 1200] points=83170 sel=9825 (0.1181) valid=57668 (0.6934) clone=8410 split=1415 thr_c=30.585255 topk_c=3192 thr_s=3099.965576 topk_s=2058 p90=600.379517 p95=1496.476074 p99=7550.563477 mem_alloc=3.14G mem_reserved=3.53G
+[ITER 1200] densify added_clone=3546 added_split=2220 pruned=43 net=5723 points=88893
+[ITER 1300] densify added_clone=3734 added_split=2204 pruned=38 net=5900 points=94793
+[ITER 1400] points=94793 sel=8169 (0.0862) valid=71493 (0.7542) clone=6078 split=2091 thr_c=39.966972 topk_c=3734 thr_s=2284.391602 topk_s=2204 p90=493.244080 p95=1265.928223 p99=8246.748047 mem_alloc=3.15G mem_reserved=3.47G
+[ITER 1400] densify added_clone=4420 added_split=2728 pruned=74 net=7074 points=101867
+[ITER 1500] densify added_clone=4784 added_split=2464 pruned=54 net=7194 points=109061
+[ITER 1600] points=109061 sel=4048 (0.0371) valid=64023 (0.5870) clone=1097 split=2951 thr_c=34.597065 topk_c=4784 thr_s=2873.409668 topk_s=2464 p90=912.304688 p95=2593.840332 p99=20444.431641 mem_alloc=3.17G mem_reserved=3.62G
+[ITER 1600] densify added_clone=3314 added_split=3087 pruned=42 net=6359 points=115420
+[ITER 1700] densify added_clone=4404 added_split=3448 pruned=47 net=7805 points=123225
+[ITER 1800] points=123225 sel=19109 (0.1551) valid=97833 (0.7939) clone=17393 split=1716 thr_c=12.269476 topk_c=4404 thr_s=2526.873779 topk_s=3448 p90=390.999359 p95=898.946777 p99=4304.438965 mem_alloc=3.18G mem_reserved=3.54G
+[ITER 1800] densify added_clone=5886 added_split=3896 pruned=79 net=9703 points=132928
+[ITER 1900] densify added_clone=6315 added_split=3126 pruned=99 net=9342 points=142270
+[ITER 2000] points=142270 sel=8132 (0.0572) valid=108551 (0.7630) clone=5637 split=2495 thr_c=26.873014 topk_c=6315 thr_s=1878.442627 topk_s=3126 p90=230.598663 p95=661.055481 p99=6337.906250 mem_alloc=3.20G mem_reserved=3.59G
+[ITER 2000] densify added_clone=7427 added_split=3427 pruned=64 net=10790 points=153060
+[ITER 2100] densify added_clone=7912 added_split=3767 pruned=80 net=11599 points=164659
+[ITER 2200] points=164659 sel=12286 (0.0746) valid=137292 (0.8338) clone=7439 split=4847 thr_c=29.446081 topk_c=7912 thr_s=1171.220703 topk_s=3767 p90=321.605164 p95=802.710083 p99=3839.789062 mem_alloc=3.22G mem_reserved=3.82G
+[ITER 2200] densify added_clone=8932 added_split=4797 pruned=105 net=13624 points=178283
+[ITER 2300] densify added_clone=9887 added_split=4977 pruned=132 net=14732 points=193015
+[ITER 2400] points=193015 sel=15137 (0.0784) valid=155726 (0.8068) clone=10396 split=4741 thr_c=19.638262 topk_c=9887 thr_s=910.433167 topk_s=4977 p90=210.152100 p95=541.927124 p99=2562.325928 mem_alloc=3.25G mem_reserved=3.73G
+[ITER 2400] densify added_clone=10420 added_split=5152 pruned=178 net=15394 points=208409
+[ITER 2500] densify added_clone=11375 added_split=3391 pruned=173 net=14593 points=223002
+[ITER 2600] points=223002 sel=12965 (0.0581) valid=149269 (0.6694) clone=12313 split=652 thr_c=24.568115 topk_c=11375 thr_s=1287.184937 topk_s=3391 p90=65.717094 p95=197.308823 p99=805.839539 mem_alloc=3.28G mem_reserved=3.79G
+[ITER 2600] densify added_clone=12587 added_split=2339 pruned=175 net=14751 points=237753
+[ITER 2700] densify added_clone=13736 added_split=3809 pruned=160 net=17385 points=255138
+[ITER 2800] points=255138 sel=16836 (0.0660) valid=212422 (0.8326) clone=11756 split=5080 thr_c=19.183624 topk_c=13736 thr_s=857.158936 topk_s=3809 p90=144.519760 p95=405.788818 p99=1814.225952 mem_alloc=3.31G mem_reserved=3.88G
+[ITER 2800] densify added_clone=15583 added_split=5658 pruned=251 net=20990 points=276128
+[ITER 2900] densify added_clone=16492 added_split=5335 pruned=367 net=21460 points=297588
+[ITER 3000] points=297588 sel=16523 (0.0555) valid=242840 (0.8160) clone=10458 split=6065 thr_c=14.448721 topk_c=16492 thr_s=624.459839 topk_s=5335 p90=125.708687 p95=321.719666 p99=1432.496948 mem_alloc=3.36G mem_reserved=4.08G
+[ITER 3000] densify added_clone=18100 added_split=6183 pruned=413 net=23870 points=321458
+[ITER 3100] densify added_clone=18477 added_split=7105 pruned=36116 net=-10534 points=310924
+[ITER 3200] points=310924 sel=43667 (0.1404) valid=224802 (0.7230) clone=41534 split=2133 thr_c=6.972495 topk_c=18477 thr_s=838.080383 topk_s=7105 p90=60.174812 p95=174.737457 p99=805.389465 mem_alloc=3.38G mem_reserved=4.27G
+[ITER 3200] densify added_clone=18530 added_split=3949 pruned=4846 net=17633 points=328557
+[ITER 3300] densify added_clone=19528 added_split=4531 pruned=2364 net=21695 points=350252
+[ITER 3400] points=350252 sel=14601 (0.0417) valid=289312 (0.8260) clone=9883 split=4718 thr_c=11.115464 topk_c=19528 thr_s=610.971130 topk_s=4531 p90=45.091820 p95=157.750656 p99=999.548096 mem_alloc=3.41G mem_reserved=4.67G
+[ITER 3400] densify added_clone=23177 added_split=5753 pruned=2394 net=26536 points=376788
+[ITER 3500] densify added_clone=23627 added_split=4414 pruned=2351 net=25690 points=402478
+[ITER 3600] points=402478 sel=15373 (0.0382) valid=328744 (0.8168) clone=11385 split=3988 thr_c=11.750594 topk_c=23627 thr_s=461.550323 topk_s=4414 p90=27.719637 p95=107.759750 p99=536.965515 mem_alloc=3.47G mem_reserved=4.54G
+[ITER 3600] densify added_clone=27701 added_split=5173 pruned=2085 net=30789 points=433267
+[ITER 3700] densify added_clone=28920 added_split=5944 pruned=1960 net=32904 points=466171
+[ITER 3800] points=466171 sel=52756 (0.1132) valid=364769 (0.7825) clone=49492 split=3264 thr_c=6.665397 topk_c=28920 thr_s=534.667480 topk_s=5944 p90=29.836628 p95=98.467865 p99=493.104523 mem_alloc=3.53G mem_reserved=4.48G
+[ITER 3800] densify added_clone=31080 added_split=5396 pruned=2277 net=34199 points=500370
+[ITER 3900] densify added_clone=22217 added_split=8427 pruned=2157 net=28487 points=528857
+[ITER 4000] points=528857 sel=50201 (0.0949) valid=428001 (0.8093) clone=47139 split=3062 thr_c=5.795664 topk_c=22217 thr_s=583.187805 topk_s=8427 p90=21.547041 p95=78.081512 p99=443.150330 mem_alloc=3.59G mem_reserved=5.21G
+[ITER 4000] densify added_clone=36811 added_split=5988 pruned=2773 net=40026 points=568883
+[ITER 4100] densify added_clone=41177 added_split=7243 pruned=2609 net=45811 points=614694
+[ITER 4200] points=614694 sel=52475 (0.0854) valid=494314 (0.8042) clone=45664 split=6811 thr_c=5.458435 topk_c=41177 thr_s=282.617828 topk_s=7243 p90=13.710942 p95=49.407917 p99=399.172180 mem_alloc=3.68G mem_reserved=5.24G
+[ITER 4200] densify added_clone=43695 added_split=5735 pruned=2755 net=46675 points=661369
+[ITER 4300] densify added_clone=39231 added_split=6061 pruned=3147 net=42145 points=703514
+[ITER 4400] points=703514 sel=74507 (0.1059) valid=529597 (0.7528) clone=66701 split=7806 thr_c=2.587898 topk_c=39231 thr_s=540.941223 topk_s=6061 p90=15.043030 p95=83.376694 p99=830.196411 mem_alloc=3.76G mem_reserved=5.30G
+[ITER 4400] densify added_clone=46095 added_split=6864 pruned=3735 net=49224 points=752738
+[ITER 4500] densify added_clone=53127 added_split=6814 pruned=3747 net=56194 points=808932
+[ITER 4600] points=808932 sel=44915 (0.0555) valid=572099 (0.7072) clone=38679 split=6236 thr_c=4.959359 topk_c=53127 thr_s=417.025604 topk_s=6814 p90=9.690139 p95=44.429260 p99=451.207245 mem_alloc=3.87G mem_reserved=6.65G
+[ITER 4600] densify added_clone=50980 added_split=6229 pruned=4191 net=53018 points=861950
+[ITER 4700] densify added_clone=62693 added_split=6244 pruned=4503 net=64434 points=926384
+[ITER 4800] points=926384 sel=71070 (0.0767) valid=666145 (0.7191) clone=63528 split=7542 thr_c=4.017973 topk_c=62693 thr_s=157.831055 topk_s=6244 p90=8.364029 p95=23.530851 p99=177.754471 mem_alloc=3.99G mem_reserved=5.72G
+[ITER 4800] densify added_clone=60223 added_split=6391 pruned=3917 net=62697 points=989081
+[ITER 4900] densify added_clone=66931 added_split=8852 pruned=4845 net=70938 points=1060019
+[ITER 5000] points=1060019 sel=95404 (0.0900) valid=880550 (0.8307) clone=86215 split=9189 thr_c=2.868600 topk_c=66931 thr_s=193.950897 topk_s=8852 p90=5.947309 p95=19.127695 p99=202.872269 mem_alloc=4.12G mem_reserved=7.25G
+[ITER 5000] densify added_clone=80463 added_split=7592 pruned=5214 net=82841 points=1142860
+[ITER 5100] densify added_clone=76931 added_split=10672 pruned=6694 net=80909 points=1223769
+[ITER 5200] points=1223769 sel=72739 (0.0594) valid=877210 (0.7168) clone=63536 split=9203 thr_c=3.274528 topk_c=76931 thr_s=303.163391 topk_s=10672 p90=8.197332 p95=40.211330 p99=317.628265 mem_alloc=4.28G mem_reserved=8.05G
+[ITER 5200] densify added_clone=77756 added_split=9965 pruned=6749 net=80972 points=1304741
+[ITER 5300] densify added_clone=84888 added_split=7938 pruned=8260 net=84566 points=1389307
+[ITER 5400] points=1389307 sel=100372 (0.0722) valid=1096651 (0.7894) clone=94783 split=5589 thr_c=2.449257 topk_c=84888 thr_s=313.291718 topk_s=7938 p90=4.977087 p95=17.473383 p99=166.049133 mem_alloc=4.45G mem_reserved=7.91G
+[ITER 5400] densify added_clone=99565 added_split=10100 pruned=9393 net=100272 points=1489579
+[ITER 5500] densify added_clone=101984 added_split=8167 pruned=9520 net=100631 points=1590210
+[ITER 5600] points=1590210 sel=91559 (0.0576) valid=1251074 (0.7867) clone=72342 split=19217 thr_c=3.015111 topk_c=101984 thr_s=113.088669 topk_s=8167 p90=4.597797 p95=17.073631 p99=187.709579 mem_alloc=4.65G mem_reserved=8.54G
+[ITER 5600] densify added_clone=112748 added_split=12359 pruned=8690 net=116417 points=1706627
+[ITER 5700] densify added_clone=111371 added_split=12239 pruned=10290 net=113320 points=1819947
+[ITER 5800] points=1819947 sel=108891 (0.0598) valid=1250537 (0.6871) clone=100224 split=8667 thr_c=2.329686 topk_c=111371 thr_s=151.866684 topk_s=12239 p90=4.214740 p95=14.247678 p99=113.980820 mem_alloc=4.88G mem_reserved=9.33G
+[ITER 5800] densify added_clone=113705 added_split=11347 pruned=9755 net=115297 points=1935244
+[ITER 5900] densify added_clone=136115 added_split=10168 pruned=10829 net=135454 points=2070698
+[ITER 6000] points=2070698 sel=146585 (0.0708) valid=1552526 (0.7498) clone=140038 split=6547 thr_c=1.858899 topk_c=136115 thr_s=200.085739 topk_s=10168 p90=3.187331 p95=9.285059 p99=94.391846 mem_alloc=5.13G mem_reserved=10.34G
+[ITER 6000] densify added_clone=143797 added_split=11454 pruned=14254 net=140997 points=2211695
+[ITER 6100] densify added_clone=142571 added_split=16139 pruned=262514 net=-103804 points=2107891
+[ITER 6200] points=2107891 sel=202680 (0.0962) valid=1743991 (0.8274) clone=191873 split=10807 thr_c=1.622256 topk_c=142571 thr_s=116.897873 topk_s=16139 p90=3.447432 p95=8.864388 p99=72.628677 mem_alloc=5.17G mem_reserved=9.01G
+[ITER 6200] densify added_clone=157925 added_split=16473 pruned=43543 net=130855 points=2238746
+[ITER 6300] densify added_clone=152660 added_split=17783 pruned=31036 net=139407 points=2378153
+[ITER 6400] points=2378153 sel=221421 (0.0931) valid=1945378 (0.8180) clone=206812 split=14609 thr_c=1.329033 topk_c=152660 thr_s=116.070549 topk_s=17783 p90=2.725552 p95=7.833505 p99=86.367935 mem_alloc=5.44G mem_reserved=9.96G
+[ITER 6400] densify added_clone=177895 added_split=16642 pruned=29802 net=164735 points=2542888
+[ITER 6500] densify added_clone=157342 added_split=15922 pruned=26413 net=146851 points=2689739
+[ITER 6600] points=2689739 sel=168139 (0.0625) valid=1765185 (0.6563) clone=158214 split=9925 thr_c=1.349313 topk_c=157342 thr_s=76.661362 topk_s=15922 p90=2.173188 p95=5.756961 p99=47.532143 mem_alloc=5.75G mem_reserved=11.13G
+[ITER 6600] densify added_clone=163743 added_split=12774 pruned=25917 net=150600 points=2840339
+[ITER 6700] densify added_clone=169385 added_split=8287 pruned=25432 net=152240 points=2992579
+[ITER 6800] points=2992579 sel=176929 (0.0591) valid=2248751 (0.7514) clone=146584 split=30345 thr_c=1.572880 topk_c=169385 thr_s=39.501213 topk_s=8287 p90=2.080365 p95=5.954224 p99=56.669731 mem_alloc=6.05G mem_reserved=12.34G
+[ITER 6800] densify added_clone=205560 added_split=19314 pruned=22226 net=202648 points=3195227
+[ITER 6900] densify added_clone=207047 added_split=12599 pruned=30493 net=189153 points=3384380
+[ITER 7000] points=3384380 sel=200814 (0.0593) valid=2137541 (0.6316) clone=168767 split=32047 thr_c=1.234165 topk_c=207047 thr_s=42.019226 topk_s=12599 p90=2.458884 p95=8.064871 p99=64.822075 mem_alloc=6.44G mem_reserved=8.97G
+[ITER 7000] densify added_clone=191440 added_split=22313 pruned=26559 net=187194 points=3571574
+[ITER 7100] densify added_clone=218119 added_split=18274 pruned=27801 net=208592 points=3780166
+[ITER 7200] points=3780166 sel=303374 (0.0803) valid=2516813 (0.6658) clone=286223 split=17151 thr_c=0.872832 topk_c=218119 thr_s=67.423416 topk_s=18274 p90=1.746601 p95=4.398432 p99=45.652130 mem_alloc=6.83G mem_reserved=13.67G
+[ITER 7200] densify added_clone=233598 added_split=18082 pruned=30722 net=220958 points=4001124
+[ITER 7300] densify added_clone=258708 added_split=21451 pruned=38462 net=241697 points=4242821
+[ITER 7400] points=4242821 sel=247406 (0.0583) valid=2875199 (0.6777) clone=236306 split=11100 thr_c=0.892775 topk_c=258708 thr_s=48.767193 topk_s=21451 p90=1.262048 p95=3.070050 p99=23.147993 mem_alloc=7.30G mem_reserved=14.77G
+[ITER 7400] densify added_clone=267667 added_split=19852 pruned=40822 net=246697 points=4489518
+[ITER 7500] densify added_clone=316707 added_split=22807 pruned=40461 net=299053 points=4788571
