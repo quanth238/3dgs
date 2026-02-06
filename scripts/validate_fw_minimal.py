@@ -200,9 +200,36 @@ def densify_effect_test(dataset, pipe, opt, background, steps, use_fw):
                 fw_mean = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 3)
                 fw_var = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 5)
                 gaussians.add_fw_stats(fw_mean, fw_var, render_pkg["visibility_filter"])
-                fw_mean_grads = gaussians.fw_mean_accum / gaussians.fw_denom
-                fw_var_grads = gaussians.fw_var_accum / gaussians.fw_denom
-                gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, None, render_pkg["radii"], grads_override=fw_mean_grads, grads_override_split=fw_var_grads, max_grad_split=opt.densify_grad_threshold)
+                fw_mean_grads = gaussians.fw_mean_accum / gaussians.fw_denom.clamp_min(1.0)
+                fw_var_grads = gaussians.fw_var_accum / gaussians.fw_denom.clamp_min(1.0)
+                mean_scores = fw_mean_grads.squeeze().abs()
+                var_scores = fw_var_grads.squeeze().abs()
+                scale_max = gaussians.get_scaling.max(dim=1).values
+                clone_mask = scale_max <= gaussians.percent_dense * scene.cameras_extent
+                split_mask = scale_max > gaussians.percent_dense * scene.cameras_extent
+                mean_valid = mean_scores[clone_mask]
+                var_valid = var_scores[split_mask]
+                topk = int(getattr(opt, "densify_topk", 0) or 0)
+                topk_ratio = float(getattr(opt, "densify_topk_ratio", 0.0) or 0.0)
+                if topk_ratio > 0.0:
+                    topk_clone = max(1, int(mean_valid.numel() * topk_ratio)) if mean_valid.numel() > 0 else 0
+                    topk_split = max(1, int(var_valid.numel() * topk_ratio)) if var_valid.numel() > 0 else 0
+                else:
+                    topk_clone = topk
+                    topk_split = topk
+                thr_clone = opt.densify_grad_threshold
+                thr_split = opt.densify_grad_threshold
+                if topk_clone > 0 and mean_valid.numel() > 0:
+                    if mean_valid.numel() > topk_clone:
+                        thr_clone = float(torch.topk(mean_valid, topk_clone, largest=True, sorted=True).values[-1].item())
+                    else:
+                        thr_clone = float("-inf")
+                if topk_split > 0 and var_valid.numel() > 0:
+                    if var_valid.numel() > topk_split:
+                        thr_split = float(torch.topk(var_valid, topk_split, largest=True, sorted=True).values[-1].item())
+                    else:
+                        thr_split = float("-inf")
+                gaussians.densify_and_prune(thr_clone, 0.005, scene.cameras_extent, None, render_pkg["radii"], grads_override=fw_mean_grads, grads_override_split=fw_var_grads, max_grad_split=thr_split)
             else:
                 gaussians.add_densification_stats(render_pkg["viewspace_points"], render_pkg["visibility_filter"])
                 gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, None, render_pkg["radii"])

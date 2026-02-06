@@ -62,6 +62,8 @@ def main():
     parser.add_argument("--out", type=str, default=None)
     parser.add_argument("--quiet", action="store_true")
     args = _safe_get_args(parser)
+    if not hasattr(args, "out"):
+        args.out = None
 
     safe_state(args.quiet)
     random.seed(args.seed)
@@ -81,6 +83,9 @@ def main():
 
     views = scene.getTrainCameras()
     total_fw = 0.0
+    total_tile = 0.0
+    total_fw_mean = 0.0
+    total_fw_var = 0.0
     total_core = 0.0
 
     # Warmup
@@ -97,7 +102,8 @@ def main():
     tile_residual, tile_energy = compute_tile_moments(residual_img)
     _, H, W = residual_img.shape
     tiles_x = (W + 16 - 1) // 16
-    _ = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], opt.fw_norm_mode)
+    _ = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 3)
+    _ = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 5)
     torch.cuda.synchronize()
 
     for _ in range(args.iters):
@@ -118,25 +124,52 @@ def main():
         torch.cuda.synchronize()
         total_core += start.elapsed_time(end)
 
+        # Tile moments
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         residual_img = image.grad.detach()
         tile_residual, tile_energy = compute_tile_moments(residual_img)
-        _, H, W = residual_img.shape
-        tiles_x = (W + 16 - 1) // 16
-        _ = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], opt.fw_norm_mode)
         end.record()
         torch.cuda.synchronize()
-        total_fw += start.elapsed_time(end)
+        total_tile += start.elapsed_time(end)
+
+        _, H, W = residual_img.shape
+        tiles_x = (W + 16 - 1) // 16
+
+        # Mean score (clone)
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        _ = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 3)
+        end.record()
+        torch.cuda.synchronize()
+        total_fw_mean += start.elapsed_time(end)
+
+        # Variance score (split)
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        _ = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 5)
+        end.record()
+        torch.cuda.synchronize()
+        total_fw_var += start.elapsed_time(end)
+
+        # total_fw computed from components after loop
 
     avg_core = total_core / args.iters
-    avg_fw = total_fw / args.iters
+    avg_tile = total_tile / args.iters
+    avg_fw_mean = total_fw_mean / args.iters
+    avg_fw_var = total_fw_var / args.iters
+    avg_fw = avg_tile + avg_fw_mean + avg_fw_var
     ratio = avg_fw / max(1e-6, avg_core)
 
     results = {
         "iters": args.iters,
         "avg_core_ms": avg_core,
+        "avg_tile_moments_ms": avg_tile,
+        "avg_fw_mean_ms": avg_fw_mean,
+        "avg_fw_var_ms": avg_fw_var,
         "avg_fw_ms": avg_fw,
         "fw_overhead_ratio": ratio,
     }

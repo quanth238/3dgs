@@ -46,6 +46,17 @@ def _ensure_depths_available(dataset):
             print(f"Warning: depth_params.json not found at '{depth_params}'. Disabling depths.")
             dataset.depths = ""
 
+def _mean_scalar(values):
+    if not values:
+        return 0.0
+    total = 0.0
+    for v in values:
+        if torch.is_tensor(v):
+            total += float(v.detach().mean().item())
+        else:
+            total += float(v)
+    return total / max(1, len(values))
+
 
 def eval_iteration(dataset, pipe, iteration, max_views=None):
     gaussians = GaussianModel(dataset.sh_degree)
@@ -61,19 +72,20 @@ def eval_iteration(dataset, pipe, iteration, max_views=None):
     ssims = []
     psnrs = []
     lpipss = []
-    for view in views:
-        rendering = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=dataset.train_test_exp)["render"]
-        gt = view.original_image.cuda()
-        ssims.append(ssim(rendering, gt))
-        psnrs.append(psnr(rendering, gt))
-        lpipss.append(lpips(rendering, gt, net_type='vgg'))
+    with torch.no_grad():
+        for view in views:
+            rendering = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=dataset.train_test_exp)["render"]
+            gt = view.original_image.cuda()
+            ssims.append(ssim(rendering, gt))
+            psnrs.append(psnr(rendering, gt))
+            lpipss.append(lpips(rendering, gt, net_type='vgg'))
 
     return {
         "iteration": iteration,
         "num_gaussians": int(gaussians.get_xyz.shape[0]),
-        "psnr": float(torch.tensor(psnrs).mean().item()),
-        "ssim": float(torch.tensor(ssims).mean().item()),
-        "lpips": float(torch.tensor(lpipss).mean().item()),
+        "psnr": _mean_scalar(psnrs),
+        "ssim": _mean_scalar(ssims),
+        "lpips": _mean_scalar(lpipss),
     }
 
 
@@ -86,6 +98,8 @@ def main():
     parser.add_argument("--out", type=str, default=None)
     parser.add_argument("--quiet", action="store_true")
     args = _safe_get_args(parser)
+    if not hasattr(args, "max_views"):
+        args.max_views = None
 
     safe_state(args.quiet)
     dataset = model.extract(args)
