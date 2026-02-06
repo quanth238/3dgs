@@ -13,7 +13,7 @@ from arguments import ModelParams, PipelineParams, OptimizationParams, get_combi
 from scene import Scene
 from gaussian_renderer import GaussianModel
 from gaussian_renderer import render, render_aux
-from utils.loss_utils import l1_loss, ssim
+from utils.loss_utils import l1_loss, ssim, create_window
 from utils.general_utils import safe_state
 
 def _default_args():
@@ -46,26 +46,54 @@ def _ensure_depths_available(dataset):
             dataset.depths = ""
 
 
-def _adjoint_phi(image, gt_image):
+def _dssim_map(image, gt_image, window_size=11):
+    x = image.detach().unsqueeze(0)
+    y = gt_image.detach().unsqueeze(0)
+    channel = x.size(1)
+    window = create_window(window_size, channel).to(x.device).type_as(x)
+    mu1 = torch.nn.functional.conv2d(x, window, padding=window_size // 2, groups=channel)
+    mu2 = torch.nn.functional.conv2d(y, window, padding=window_size // 2, groups=channel)
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+    sigma1_sq = torch.nn.functional.conv2d(x * x, window, padding=window_size // 2, groups=channel) - mu1_sq
+    sigma2_sq = torch.nn.functional.conv2d(y * y, window, padding=window_size // 2, groups=channel) - mu2_sq
+    sigma12 = torch.nn.functional.conv2d(x * y, window, padding=window_size // 2, groups=channel) - mu1_mu2
+    c1 = 0.01 ** 2
+    c2 = 0.03 ** 2
+    ssim_map = ((2 * mu1_mu2 + c1) * (2 * sigma12 + c2)) / ((mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2))
+    dssim = (1.0 - ssim_map) * 0.5
+    return dssim.mean(dim=1, keepdim=True).squeeze(0)
+
+
+def _adjoint_phi(image, gt_image, error_type):
+    if error_type == "dssim":
+        return _dssim_map(image, gt_image)
+    if error_type == "l1":
+        diff = (image.detach() - gt_image).abs()
+        return diff.sum(dim=0, keepdim=True)
+    if image.grad is not None:
+        grad = image.grad.detach().abs()
+        return grad.sum(dim=0, keepdim=True)
     diff = (image.detach() - gt_image).abs()
     return diff.sum(dim=0, keepdim=True)
 
 
-def _adjoint_score(view, gaussians, pipe, background, image, gt_image):
-    phi_scalar = _adjoint_phi(image, gt_image)
-    phi = phi_scalar.repeat(3, 1, 1)
-    def _grad_for(signal):
-        aux = torch.ones((gaussians.get_xyz.shape[0], 3), device="cuda", requires_grad=True)
-        aux_img = render_aux(view, gaussians, pipe, override_color=aux)["render"]
-        if view.alpha_mask is not None:
-            aux_img = aux_img * view.alpha_mask.cuda()
-        loss = (aux_img * signal).sum()
-        grad = torch.autograd.grad(loss, aux, retain_graph=False, create_graph=False, allow_unused=False)[0]
-        return grad.sum(dim=-1)
+def _adjoint_score(view, gaussians, pipe, background, image, gt_image, use_trained_exp=False, error_type="grad"):
+    phi = _adjoint_phi(image, gt_image, error_type)
+    w0 = torch.ones_like(phi)
+    w1 = phi
 
     with torch.enable_grad():
-        M = _grad_for(phi)
-    score = M.clamp_min(0.0)
+        aux = torch.ones((gaussians.get_xyz.shape[0], 3), device="cuda", requires_grad=True)
+        aux_pkg = render_aux(view, gaussians, pipe, override_color=aux, use_trained_exp=use_trained_exp)
+        aux_img = aux_pkg["render"]
+        if view.alpha_mask is not None:
+            aux_img = aux_img * view.alpha_mask.cuda()
+        loss = (aux_img[0] * w0 + aux_img[1] * w1).sum()
+        grad = torch.autograd.grad(loss, aux, retain_graph=False, create_graph=False, allow_unused=False)[0]
+
+    score = grad[:, 1].clamp_min(0.0)
     return score
 
 def _rankdata(x: torch.Tensor) -> torch.Tensor:
@@ -138,12 +166,19 @@ def main():
         if view.alpha_mask is not None:
             image = image * view.alpha_mask.cuda()
         gt_image = view.original_image.cuda()
+        if view.alpha_mask is not None:
+            gt_image = gt_image * view.alpha_mask.cuda()
         Ll1 = l1_loss(image, gt_image)
         ssim_value = ssim(image, gt_image)
         loss = (1.0 - opt_args.lambda_dssim) * Ll1 + opt_args.lambda_dssim * (1.0 - ssim_value)
+        try:
+            image.retain_grad()
+        except Exception:
+            pass
         loss.backward()
 
-        fw_score = _adjoint_score(view, gaussians, pipe, background, image, gt_image)
+        error_type = getattr(opt_args, "awsrm_error_type", "grad")
+        fw_score = _adjoint_score(view, gaussians, pipe, background, image, gt_image, use_trained_exp=dataset.train_test_exp, error_type=error_type)
 
         feat_dc = gaussians._features_dc.grad
         feat_rest = gaussians._features_rest.grad

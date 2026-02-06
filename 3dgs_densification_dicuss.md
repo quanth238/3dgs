@@ -4204,3 +4204,346 @@ Nếu làm đúng, mình kỳ vọng bạn **ít nhất** sẽ kéo về ngang b
 ---
 
 Nếu bạn muốn bước tiếp theo “đinh” để không phí thời gian: mình sẽ viết một checklist triển khai cụ thể theo training loop của 3DGS **cho phiên bản AW-SRM dùng scalar-channel + aux loss** (từng tensor lấy ở đâu, detach thế nào, buffer nào cần thêm, và cách không làm hỏng backward của loss chính). Điều này sẽ biến hướng này thành một kế hoạch code được ngay, không còn là “paper math”.
+
+* * *
+
+**You:**
+
+viết một checklist triển khai cụ thể theo training loop của 3DGS cho phiên bản AW-SRM dùng scalar-channel + aux loss (từng tensor lấy ở đâu, detach thế nào, buffer nào cần thêm, và cách không làm hỏng backward của loss chính). Điều này sẽ biến hướng này thành một kế hoạch code được ngay, không còn là “paper math”.
+
+* * *
+
+**ChatGPT:**
+
+Dưới đây là **checklist triển khai “AW‑SRM (scalar‑channel + aux loss)”** theo đúng training loop của **graphdeco 3DGS** (repo gốc), dạng “code‑plan chạy được ngay”, kèm **mapping tensor**, **detach**, **buffer**, và **graph‑safety**.
+
+Mình sẽ bám sát đúng 3 điểm neo trong code gốc:
+
+* **train.py**: thứ tự _render → loss → backward → (no_grad) densify stats/densify → optimizer step_ [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/train.py)
+* **gaussian_renderer/render()**: có sẵn `override_color` để render “màu precomputed” (không phải SH) [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/gaussian_renderer/__init__.py)
+* **GaussianModel**: có sẵn “densification stats buffer” và logic clone/split/prune [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/scene/gaussian_model.py)
+
+Điểm quan trọng: trick **aux scalar + dot product loss với error detach** đã được _Revising Densification_ mô tả rõ (Implementation details), và họ chứng minh gradient theo scalar cho ra đúng “per‑Gaussian error” (chia blame theo **alpha compositing coefficient** $\alpha$). [ar5iv](https://ar5iv.org/pdf/2404.06109)
+
+---
+
+## 0) Chọn schedule để overhead không nổ (khuyến nghị)
+
+Nếu bạn chạy aux pass mỗi iteration thì cost gần như thêm một lần render/backward → thường quá nặng. Thay vào đó:
+
+* **`awsrm_collect_every`**: thu stats mỗi 8–32 iter (tuỳ GPU/scene)
+* Densify vẫn chạy theo `densification_interval` như baseline, chỉ khác nguồn score
+
+Revising Densification cũng chạy ADC theo schedule và thu “score” giữa các lần chạy ADC, và còn có cơ chế **budget**: nếu quá nhiều primitive đủ điều kiện thì chỉ giữ cái score cao nhất trong budget. [ar5iv](https://ar5iv.org/pdf/2404.06109)
+
+---
+
+## 1) Thêm hyper‑params (arguments)
+
+**OptimizationParams / args:**
+
+* `--awsrm_enable` (bool)
+* `--awsrm_collect_every` (int, ví dụ 16)
+* `--awsrm_error_type {l1, dssim}`
+* `--awsrm_use_moments` (bool) _(bật Z/M/Q để tách clone/split theo mean/variance)_
+* `--awsrm_eps` (float, 1e-6)
+* `--awsrm_K_clone`, `--awsrm_K_split` **hoặc** `--awsrm_clone_frac`, `--awsrm_split_frac`
+* `--awsrm_accum_mode {sum, ema, max}`
+    * `max` là closest với Revising (track max across views) [ar5iv](https://ar5iv.org/pdf/2404.06109)
+    * nhưng **moments (var)** thường ổn hơn với `sum/ema`
+
+---
+
+## 2) Sửa/Thêm hàm renderer cho “aux pass” (gaussian_renderer/**init**.py)
+
+### 2.1 Mục tiêu
+
+Ta cần render một “ảnh phụ” $S(u)$ mà **giữ nguyên alpha compositing/visibility** như RGB render, nhưng **màu** được thay bằng một tensor aux per‑Gaussian.
+
+Bạn đã có sẵn `override_color` trong `render()` để đưa `colors_precomp` vào rasterizer. [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/gaussian_renderer/__init__.py)
+
+### 2.2 Checklist triển khai `render_aux()`
+
+Tạo hàm mới (copy từ `render()` để kiểm soát detach/grad/clamp):
+
+**[Renderer] `render_aux(viewpoint_cam, pc, pipe, override_color, ...)`**
+
+* **Input:**
+    * `override_color`: shape `[N, 3]`, **requires_grad=True**
+* **Detach toàn bộ Gaussian params**:
+    * `means3D = pc.get_xyz.detach()`
+    * `opacity = pc.get_opacity.detach()`
+    * `scales = pc.get_scaling.detach()` hoặc `cov3D_precomp = pc.get_covariance(...).detach()`
+    * `rotations = pc.get_rotation.detach()`
+* **means2D**:
+    * baseline tạo `screenspace_points` requires_grad=True để lấy grad 2D mean cho densify [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/gaussian_renderer/__init__.py)
+    * aux pass **không cần** grad mean2D ⇒ tạo `means2D = torch.zeros_like(pc.get_xyz, requires_grad=False, device="cuda")`
+* **bg_color**:
+    * set `bg = torch.zeros(3, device="cuda")` để không “leak” background vào aux signal
+* **Exposure**:
+    * set `use_trained_exp=False` (đừng apply exposure matrix)
+* **Clamp**:
+    * baseline `render()` clamp output cuối hàm [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/gaussian_renderer/__init__.py)
+    * aux pass **khuyến nghị bỏ clamp** (thêm flag `clamp_output=False`) để tránh edge-case gradient bị cắt ở biên (dù thường không sao).
+
+**Output:**
+
+* `aux_img` shape `[3, H, W]`
+* `visibility_filter` (indices của `radii > 0`, y hệt baseline) [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/gaussian_renderer/__init__.py)
+* `radii` (để dùng size gating/threshold nếu muốn)
+
+---
+
+## 3) Compute per-pixel error map E(u) (tensor lấy ở đâu + detach)
+
+Trong `train.py` baseline, bạn đã có:
+
+* `image = render_pkg["render"]` (3,H,W)
+* `gt_image = viewpoint_cam.original_image.cuda()`
+* có thể có `alpha_mask`: baseline multiply vào `image` trước loss [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/train.py)
+
+### 3.1 Checklist lấy tensor đúng chỗ (trong loop)
+
+Ngay sau khi có `image` và trước/hoặc sau backward đều được, nhưng **E phải detach**.
+
+* Nếu `alpha_mask` tồn tại:
+    * baseline đã làm `image *= alpha_mask` trước loss [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/train.py)
+    * vậy bạn dùng chính `image` đó để tính E là nhất quán.
+
+### 3.2 E(u) đề xuất
+
+Option nhanh và ổn:
+
+* `E = (image.detach() - gt_image).abs().mean(dim=0)` → shape `[H,W]`, float32
+* `E = E.detach()` (double‑safety)
+
+Option theo Revising (per‑pixel SSIM/DSSIM):
+
+* Bạn có thể implement per-pixel DSSIM map (nặng hơn), còn trick “dot product với error detach” là core. [ar5iv](https://ar5iv.org/pdf/2404.06109)
+
+---
+
+## 4) Core: Scalar‑channel + Aux loss để lấy Z/M/Q bằng autograd.grad
+
+Đây là phần “khóa” giúp score **adjoint‑correct** theo alpha‑compositing, đúng như Revising: redistribute per‑pixel errors **tỉ lệ theo $\alpha$**. [ar5iv](https://ar5iv.org/pdf/2404.06109)
+
+### 4.1 Tensors cần tạo
+
+* `N = gaussians.get_xyz.shape[0]`
+* `aux = torch.zeros((N,3), device="cuda", dtype=torch.float32, requires_grad=True)`
+
+> Lưu ý: Revising khởi tạo scalar = 1 và “never update it”, gradient theo scalar cho ra per‑Gaussian error. [ar5iv](https://ar5iv.org/pdf/2404.06109)
+> Với chúng ta, init 0/1 đều OK vì gradient không phụ thuộc giá trị (linear).
+
+### 4.2 Weights (detach)
+
+* `w0 = torch.ones_like(E)`
+* `w1 = E`
+* `w2 = E * E`
+    Tất cả đều `requires_grad=False`.
+
+### 4.3 Render aux + build L_aux
+
+**Quan trọng:** baseline densify nằm trong `with torch.no_grad():` sau `loss.backward()` [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/train.py)
+→ aux pass cần grad, nên wrap `torch.enable_grad()`.
+
+Pseudo‑block (đúng vị trí trong loop):
+
+```python
+# sau loss.backward(), đang ở with torch.no_grad():
+if awsrm_enable and iteration % awsrm_collect_every == 0 and iteration < densify_until_iter:
+    E = ((image.detach() - gt_image).abs().mean(0)).detach()    # [H,W]
+    w0 = torch.ones_like(E)
+    w1 = E
+    w2 = E * E
+
+    with torch.enable_grad():
+        aux = torch.zeros((N,3), device="cuda", requires_grad=True)
+        aux_img, vis_idx, radii_aux = render_aux(viewpoint_cam, gaussians, pipe, override_color=aux)
+        L_aux = (aux_img[0]*w0 + aux_img[1]*w1 + aux_img[2]*w2).sum()
+
+        g = torch.autograd.grad(L_aux, aux, retain_graph=False, create_graph=False)[0]  # [N,3]
+        Z = g[:,0:1]   # sum alpha
+        M = g[:,1:2]   # sum alpha * E
+        Q = g[:,2:3]   # sum alpha * E^2
+```
+
+**Giải thích “không phá backward loss chính”:**
+
+* `E` detach → giống Revising (error gradient detached) [ar5iv](https://ar5iv.org/pdf/2404.06109)
+* Gaussian params trong aux render đều `.detach()` → không có grad về model
+* dùng `torch.autograd.grad` → không accumulate vào `.grad` của params training
+
+### 4.4 “Visibility filter” dùng gì?
+
+Dùng `vis_idx` từ aux render (radii > 0 indices) giống format baseline `render()` trả về. [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/gaussian_renderer/__init__.py)
+Hoặc reuse `visibility_filter` từ RGB render_pkg nếu bạn chắc camera/pipe giống hệt.
+
+---
+
+## 5) Buffers cần thêm trong GaussianModel (data structures)
+
+Trong `GaussianModel.__init__` và `training_setup()` baseline đã có:
+
+* `xyz_gradient_accum`, `denom`, `max_radii2D` [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/scene/gaussian_model.py)
+
+Bạn thêm tương tự:
+
+### 5.1 Buffers mới
+
+* `aw_Z_accum: (N,1)`
+* `aw_M_accum: (N,1)`
+* `aw_Q_accum: (N,1)`
+* `aw_denom: (N,1)` _(nếu bạn dùng average/EMA; nếu dùng sum thuần thì có thể không cần)_
+
+**Init** trong `training_setup()`:
+
+* zeros on cuda, shape khớp số gaussian hiện tại (y như baseline init xyz_gradient_accum/denom). [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/scene/gaussian_model.py)
+
+### 5.2 Hàm update stats
+
+Thêm method:
+
+* `add_awsrm_stats(Z, M, Q, update_filter, mode='sum'/'ema'/'max')`
+
+Checklist update:
+
+* Nếu `mode='sum'`:
+    * `aw_Z[upd] += Z[upd]`
+    * `aw_M[upd] += M[upd]`
+    * `aw_Q[upd] += Q[upd]`
+    * `aw_denom[upd] += 1`
+* Nếu `mode='max'` (giống Revising tracking max across views) [ar5iv](https://ar5iv.org/pdf/2404.06109):
+    * `aw_M[upd] = max(aw_M[upd], M[upd])`
+    * (Q/Z tuỳ bạn; variance thường không hợp max‑separate vì mismatch view)
+
+---
+
+## 6) Densify step: thay nguồn “grads” bằng AW‑SRM score, nhưng vẫn reuse clone/split code
+
+Baseline densify:
+
+* `add_densification_stats(viewspace_point_tensor.grad[:2])`
+* `densify_and_prune(densify_grad_threshold, ...)` [GitHub+1](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/train.py)
+
+Ta làm tương tự nhưng grads = score.
+
+### 6.1 Tính score từ buffers (tại densification_interval)
+
+Trong `GaussianModel.densify_and_prune_awsrm(...)`:
+
+* `Z = aw_Z_accum` (hoặc chia aw_denom nếu dùng avg)
+* `M = aw_M_accum`
+* `Q = aw_Q_accum`
+* `eps = awsrm_eps`
+
+**Clone score (mean/error mass):**
+
+* `score_clone = M`
+    (tương đương Revising: per‑Gaussian error là dot(error, alpha) và lấy max/sum để quyết densify) [ar5iv](https://ar5iv.org/pdf/2404.06109)
+
+**Split score (variance / high‑freq proxy):**
+
+* `score_split = Q - (M*M)/(Z + eps)`
+* Option: nhân thêm factor theo size để ưu tiên split gaussian lớn:
+    * `score_split *= f(scale)` hoặc `*= radii` (cẩn thận scale‑dependence)
+
+### 6.2 Ép top‑K budget bằng threshold “kth value”
+
+Revising dùng budget control: nếu số primitive vượt ngân sách, chỉ giữ score cao nhất trong budget. [ar5iv](https://ar5iv.org/pdf/2404.06109)
+Bạn có thể triển khai theo đúng tinh thần đó:
+
+* Xác định nhóm clone/split theo size giống baseline:
+    * clone (small): `max(scale) <= percent_dense * extent` [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/scene/gaussian_model.py)
+    * split (large): còn lại [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/scene/gaussian_model.py)
+* Lấy top‑K trong mỗi nhóm:
+    * `thr_clone = kth_largest(score_clone[mask_small], K_clone)`
+    * `thr_split = kth_largest(score_split[mask_large], K_split)`
+* Reuse code có sẵn:
+    * `densify_and_clone(score_clone, thr_clone, extent)` [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/scene/gaussian_model.py)
+    * `densify_and_split(score_split, thr_split, extent)` [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/scene/gaussian_model.py)
+
+### 6.3 Opacity correction sau clone (rất nên bật)
+
+Revising chỉ ra giữ nguyên opacity khi clone gây bias alpha‑compositing và đưa công thức sửa (giải phương trình để ra opacity mới). [ar5iv](https://ar5iv.org/pdf/2404.06109)
+Checklist:
+
+* Trong `densify_and_clone`, sau khi chọn `selected_pts_mask` và tạo `new_opacities`, áp dụng opacity correction cho **clone**.
+* Với **split** thì giữ nguyên (Revising nói correction derivation không khớp split). [ar5iv](https://ar5iv.org/pdf/2404.06109)
+
+### 6.4 Reset buffers sau khi densify
+
+Baseline sau densify nó reset `xyz_gradient_accum` & `denom` về zeros trong `densification_postfix`. [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/scene/gaussian_model.py)
+Bạn làm y hệt:
+
+* reset `aw_*` về zeros (toàn bộ hoặc cat‑zeros cho phần mới).
+
+---
+
+## 7) Shape‑changing ops: prune_points & densification_postfix phải “đụng” thêm AW buffers
+
+Trong `GaussianModel.prune_points(mask)` baseline prune các tensor và cả accumulators. [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/scene/gaussian_model.py)
+Checklist:
+
+* Trong `prune_points`:
+    * `aw_Z = aw_Z[valid_points_mask]`
+    * `aw_M = aw_M[valid_points_mask]`
+    * `aw_Q = aw_Q[valid_points_mask]`
+    * `aw_denom = aw_denom[valid_points_mask]`
+
+Trong `densification_postfix(...)` baseline concat params vào optimizer và reset accumulators. [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/scene/gaussian_model.py)
+Checklist:
+
+* Sau khi append points:
+    * reset `aw_* = zeros(newN,1)` **hoặc**
+    * cat zeros cho phần mới rồi (tuỳ bạn muốn giữ history; thường reset là đủ vì vừa densify xong)
+
+---
+
+## 8) Graph‑safety checklist (đảm bảo “không làm hỏng backward loss chính”)
+
+**Bắt buộc:**
+
+* [ ]  `E` phải detach (giống Revising: “error with gradient detached”) [ar5iv](https://ar5iv.org/pdf/2404.06109)
+* [ ]  Aux pass dùng `torch.enable_grad()` (vì bạn đang ở no_grad block của densification trong train.py) [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/train.py)
+* [ ]  Aux render dùng **pc params detach** (means3D/opacities/scales/rotations/cov) để không tạo gradient về model
+* [ ]  Lấy gradient bằng `torch.autograd.grad(L_aux, aux)` (không dùng `.backward()`), để:
+    * không accumulate `.grad` vào Gaussian params
+    * không cần `retain_graph=True`
+* [ ]  `aux` **không** nằm trong optimizer param groups, chỉ tồn tại trong scope ngắn rồi xoá
+
+**Nice-to-have:**
+
+* [ ]  Thêm flag `clamp_output=False` trong `render_aux` để tránh clamp cắt gradient ở edge-case (baseline render clamp ảnh) [GitHub](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/gaussian_renderer/__init__.py)
+* [ ]  Set `bg=0` trong aux render để tránh background ảnh hưởng moment
+
+---
+
+## 9) Sanity checks (chạy ngay sau khi implement)
+
+1. **Reproduce đúng “Revising trick” với 1 scalar**
+
+* Bật chế độ chỉ dùng 1 kênh: `L_aux = (aux_img[0] * E).sum()`
+* Kiểm tra `g[:,0]` có phân bố hợp lý và chọn đúng vùng error.
+    Đây đúng y hệt công thức họ mô tả (aux scalar + dot product) [ar5iv](https://ar5iv.org/pdf/2404.06109)
+
+2. **Invariance theo init aux**
+
+* aux=0, aux=1 → gradient Z/M/Q gần như y hệt (vì render là tuyến tính theo aux scalar).
+
+3. **Không “rò” gradient vào model**
+
+* Sau khi chạy AW‑SRM block, assert:
+    * `gaussians._xyz.grad` không đổi so với sau `loss.backward()` (hoặc bạn snapshot và so sánh norm).
+    * hoặc đơn giản: chạy AW block trước optimizer.step và verify loss curve không “nhảy”.
+
+4. **Metric sanity**
+
+* correlation `spearman(score_clone, featgrad_norm)` phải tăng mạnh (vì bây giờ đã có visibility/alpha attribution đúng kiểu Revising). [ar5iv](https://ar5iv.org/pdf/2404.06109)
+
+---
+
+### Kết luận ngắn (để bạn tự tin “đây không phải paper math”)
+
+Cách làm này **không phải bịa**: _Revising Densification_ đã dùng đúng mechanism “thêm scalar, render scalar, dot(error_detach, scalar_render), lấy grad theo scalar để ra per‑Gaussian error”. [ar5iv](https://ar5iv.org/pdf/2404.06109)
+Bạn đang mở rộng nó lên 3‑kênh để lấy **moments (Z/M/Q)** nhằm tách clone/split theo mean/variance, và tích hợp trực tiếp vào training loop 3DGS theo đúng vị trí baseline đang densify. [GitHub+1](https://raw.githubusercontent.com/graphdeco-inria/gaussian-splatting/main/train.py)

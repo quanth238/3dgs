@@ -162,7 +162,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     return out
 
 
-def render_aux(viewpoint_camera, pc: GaussianModel, pipe, override_color: torch.Tensor, scaling_modifier=1.0, bg_color=None):
+def render_aux(viewpoint_camera, pc: GaussianModel, pipe, override_color: torch.Tensor, scaling_modifier=1.0, bg_color=None, use_trained_exp=False):
     """
     Auxiliary render pass for AW-SRM statistics.
     Uses override_color (requires_grad=True) and detaches all Gaussian params.
@@ -227,6 +227,10 @@ def render_aux(viewpoint_camera, pc: GaussianModel, pipe, override_color: torch.
         rotations=rotations,
         cov3D_precomp=cov3D_precomp
     )
+
+    if use_trained_exp:
+        exposure = pc.get_exposure_from_name(viewpoint_camera.image_name).detach()
+        rendered_image = torch.matmul(rendered_image.permute(1, 2, 0), exposure[:3, :3]).permute(2, 0, 1) + exposure[:3, 3, None, None]
 
     out = {
         "render": rendered_image,

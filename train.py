@@ -11,8 +11,9 @@
 
 import os
 import torch
+import torch.nn.functional as F
 from random import randint
-from utils.loss_utils import l1_loss, ssim
+from utils.loss_utils import l1_loss, ssim, create_window
 from gaussian_renderer import render, render_aux, network_gui
 import sys
 from scene import Scene, GaussianModel
@@ -66,39 +67,67 @@ def _effective_percentile(opt, iteration):
     return pct
 
 
-def _adjoint_phi(image, gt_image):
+def _dssim_map(image, gt_image, window_size=11):
+    x = image.detach().unsqueeze(0)
+    y = gt_image.detach().unsqueeze(0)
+    channel = x.size(1)
+    window = create_window(window_size, channel).to(x.device).type_as(x)
+    mu1 = F.conv2d(x, window, padding=window_size // 2, groups=channel)
+    mu2 = F.conv2d(y, window, padding=window_size // 2, groups=channel)
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+    sigma1_sq = F.conv2d(x * x, window, padding=window_size // 2, groups=channel) - mu1_sq
+    sigma2_sq = F.conv2d(y * y, window, padding=window_size // 2, groups=channel) - mu2_sq
+    sigma12 = F.conv2d(x * y, window, padding=window_size // 2, groups=channel) - mu1_mu2
+    c1 = 0.01 ** 2
+    c2 = 0.03 ** 2
+    ssim_map = ((2 * mu1_mu2 + c1) * (2 * sigma12 + c2)) / ((mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2))
+    dssim = (1.0 - ssim_map) * 0.5
+    return dssim.mean(dim=1, keepdim=True).squeeze(0)
+
+
+def _adjoint_phi(image, gt_image, error_type):
+    if error_type == "dssim":
+        return _dssim_map(image, gt_image)
+    if error_type == "l1":
+        diff = (image.detach() - gt_image).abs()
+        return diff.sum(dim=0, keepdim=True)
+    # default: grad-based
+    if image.grad is not None:
+        grad = image.grad.detach().abs()
+        return grad.sum(dim=0, keepdim=True)
     diff = (image.detach() - gt_image).abs()
     return diff.sum(dim=0, keepdim=True)
 
 
-def _adjoint_scores(viewpoint_cam, gaussians, pipe, image, gt_image):
-    phi_scalar = _adjoint_phi(image, gt_image)
-    phi = phi_scalar.repeat(3, 1, 1)
-    ones = torch.ones_like(phi)
+def _adjoint_scores(viewpoint_cam, gaussians, pipe, image, gt_image, use_trained_exp=False, error_type="grad"):
+    # Scalar error map (detached) used for attribution.
+    phi = _adjoint_phi(image, gt_image, error_type)
+    w0 = torch.ones_like(phi)
+    w1 = phi
+    w2 = phi * phi
 
-    def _grad_for(signal):
+    with torch.enable_grad():
         aux = torch.ones((gaussians.get_xyz.shape[0], 3), device="cuda", requires_grad=True)
-        aux_img = render_aux(
+        aux_pkg = render_aux(
             viewpoint_cam,
             gaussians,
             pipe,
             override_color=aux,
-        )["render"]
+            use_trained_exp=use_trained_exp,
+        )
+        aux_img = aux_pkg["render"]
         if viewpoint_cam.alpha_mask is not None:
             aux_img = aux_img * viewpoint_cam.alpha_mask.cuda()
-        loss = (aux_img * signal).sum()
+
+        loss = (aux_img[0] * w0 + aux_img[1] * w1 + aux_img[2] * w2).sum()
         grad = torch.autograd.grad(loss, aux, retain_graph=False, create_graph=False, allow_unused=False)[0]
-        return grad.sum(dim=-1)
 
-    with torch.enable_grad():
-        M = _grad_for(phi)
-        Q = _grad_for(phi * phi)
-        Z = _grad_for(ones)
-
-    M = M.clamp_min(0.0)
-    Q = Q.clamp_min(0.0)
-    Z = Z.clamp_min(0.0)
-    return M, Q, Z
+    Z = grad[:, 0]
+    M = grad[:, 1]
+    Q = grad[:, 2]
+    return M, Q, Z, aux_pkg["visibility_filter"]
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
@@ -183,7 +212,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         should_densify = (iteration < opt.densify_until_iter and
                           iteration > opt.densify_from_iter and
                           iteration % opt.densification_interval == 0)
-        collect_every = max(1, min(32, opt.densification_interval // 4))
+        collect_every = opt.awsrm_collect_every if opt.awsrm_collect_every > 0 else max(1, min(32, opt.densification_interval // 4))
         should_collect = (opt.fw_densify and
                           iteration < opt.densify_until_iter and
                           iteration > opt.densify_from_iter and
@@ -204,6 +233,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             image *= alpha_mask
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
+        if viewpoint_cam.alpha_mask is not None:
+            gt_image = gt_image * alpha_mask
         Ll1 = l1_loss(image, gt_image)
         if FUSED_SSIM_AVAILABLE:
             ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
@@ -211,6 +242,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ssim_value = ssim(image, gt_image)
 
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        try:
+            image.retain_grad()
+        except Exception:
+            pass
 
         # Depth regularization
         Ll1depth_pure = 0.0
@@ -234,8 +269,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             fw_mean = None
             fw_var = None
             fw_denom = None
+            fw_vis_filter = None
             if need_fw_stats:
-                fw_mean, fw_var, fw_denom = _adjoint_scores(viewpoint_cam, gaussians, pipe, image, gt_image)
+                fw_mean, fw_var, fw_denom, fw_vis_filter = _adjoint_scores(
+                    viewpoint_cam, gaussians, pipe, image, gt_image,
+                    use_trained_exp=dataset.train_test_exp, error_type=opt.awsrm_error_type
+                )
 
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -258,10 +297,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 if opt.fw_densify:
                     if need_fw_stats:
-                        gaussians.add_fw_stats(fw_mean, fw_var, fw_denom, visibility_filter)
+                        update_filter = fw_vis_filter if fw_vis_filter is not None else visibility_filter
+                        gaussians.add_fw_stats(fw_mean, fw_var, fw_denom, update_filter)
                 else:
                     gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
+                awsrm_use_moments = bool(getattr(opt, "awsrm_use_moments", 1))
                 if opt.fw_densify:
                     Z = gaussians.fw_denom
                     M = gaussians.fw_mean_accum
@@ -270,6 +311,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     mean_scores = M
                     var_scores = (Q - (M * M) / (Z.clamp_min(eps))).clamp_min(0.0)
                     var_scores = var_scores * gaussians.max_radii2D.clamp_min(1.0).unsqueeze(-1)
+                    if not awsrm_use_moments:
+                        var_scores = mean_scores
                 else:
                     denom_raw = gaussians.denom
                     denom = denom_raw.clamp_min(1.0)
@@ -345,39 +388,121 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     _log_iter_stats(progress_bar, iter_log_path, msg)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                    num_pts = int(mean_norm.numel())
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     base_threshold = opt.densify_grad_threshold
                     eff_pct = _effective_percentile(opt, iteration)
                     eff_topk = int(getattr(opt, "densify_topk", 0) or 0)
                     eff_topk_ratio = float(getattr(opt, "densify_topk_ratio", 0.0) or 0.0)
+                    awsrm_k_clone = int(getattr(opt, "awsrm_K_clone", 0) or 0)
+                    awsrm_k_split = int(getattr(opt, "awsrm_K_split", 0) or 0)
+                    awsrm_clone_frac = float(getattr(opt, "awsrm_clone_frac", 0.0) or 0.0)
+                    awsrm_split_frac = float(getattr(opt, "awsrm_split_frac", 0.0) or 0.0)
+                    use_budget = opt.fw_densify and getattr(opt, "awsrm_max_primitives", 0) > 0
+                    budget_total = 0
+                    if use_budget:
+                        budget_total = max(0, int(opt.awsrm_max_primitives) - num_pts)
 
                     def _compute_threshold(values, topk, pct, default_thr):
                         if values.numel() == 0:
                             return float("inf"), 0
                         if topk > 0:
-                            if values.numel() > topk:
-                                thr = float(torch.topk(values, topk, largest=True, sorted=True).values[-1].item())
-                            else:
-                                thr = float("-inf")
-                            return thr, topk
+                            k = min(topk, values.numel())
+                            if k <= 0:
+                                return float("inf"), 0
+                            thr = float(torch.topk(values, k, largest=True, sorted=True).values[-1].item())
+                            return thr, k
                         if pct > 0.0:
                             return float(torch.quantile(values, pct).item()), 0
                         return default_thr, 0
 
                     clone_values = valid_clone_norm
                     split_values = valid_split_norm
-                    topk_clone = eff_topk
-                    topk_split = eff_topk
-                    if eff_topk_ratio > 0.0:
-                        topk_clone = int(clone_values.numel() * eff_topk_ratio)
-                        topk_split = int(split_values.numel() * eff_topk_ratio)
-                        if clone_values.numel() > 0 and topk_clone == 0:
-                            topk_clone = 1
-                        if split_values.numel() > 0 and topk_split == 0:
-                            topk_split = 1
 
-                    thr_clone, used_topk_clone = _compute_threshold(clone_values, topk_clone, eff_pct, base_threshold)
-                    thr_split, used_topk_split = _compute_threshold(split_values, topk_split, eff_pct, base_threshold)
+                    # Determine top-k budget for clone/split.
+                    topk_clone = awsrm_k_clone if awsrm_k_clone > 0 else eff_topk
+                    topk_split = awsrm_k_split if awsrm_k_split > 0 else eff_topk
+                    clone_frac = awsrm_clone_frac if awsrm_clone_frac > 0.0 else eff_topk_ratio
+                    split_frac = awsrm_split_frac if awsrm_split_frac > 0.0 else eff_topk_ratio
+                    if topk_clone <= 0 and clone_frac > 0.0:
+                        topk_clone = int(clone_values.numel() * clone_frac)
+                    if topk_split <= 0 and split_frac > 0.0:
+                        topk_split = int(split_values.numel() * split_frac)
+                    if clone_values.numel() > 0 and topk_clone == 0 and (awsrm_k_clone > 0 or clone_frac > 0.0):
+                        topk_clone = 1
+                    if split_values.numel() > 0 and topk_split == 0 and (awsrm_k_split > 0 or split_frac > 0.0):
+                        topk_split = 1
+
+                    # Enforce budgeted LMO if max_primitives is set.
+                    pct_for_selection = eff_pct
+                    force_no_densify = False
+                    if use_budget:
+                        pct_for_selection = 0.0
+                        if budget_total <= 0:
+                            topk_clone = 0
+                            topk_split = 0
+                            force_no_densify = True
+                        elif topk_clone == 0 and topk_split == 0:
+                            total_valid = clone_values.numel() + split_values.numel()
+                            if total_valid > 0:
+                                clone_share = clone_values.numel() / total_valid
+                            else:
+                                clone_share = 0.5
+                            topk_clone = int(budget_total * clone_share)
+                            topk_split = max(0, budget_total - topk_clone)
+
+                    # Cap by available valid candidates.
+                    if topk_clone > clone_values.numel():
+                        topk_clone = clone_values.numel()
+                    if topk_split > split_values.numel():
+                        topk_split = split_values.numel()
+
+                    # If budget_total is active, scale down to fit budget.
+                    if use_budget and budget_total > 0:
+                        total_req = topk_clone + topk_split
+                        if total_req > budget_total and total_req > 0:
+                            scale = budget_total / float(total_req)
+                            topk_clone = int(topk_clone * scale)
+                            topk_split = int(topk_split * scale)
+                        # Distribute remaining budget if any.
+                        remainder = budget_total - (topk_clone + topk_split)
+                        if remainder > 0:
+                            if clone_values.numel() - topk_clone >= split_values.numel() - topk_split:
+                                add_clone = min(remainder, max(0, clone_values.numel() - topk_clone))
+                                topk_clone += add_clone
+                                remainder -= add_clone
+                            if remainder > 0:
+                                add_split = min(remainder, max(0, split_values.numel() - topk_split))
+                                topk_split += add_split
+
+                    thr_clone, used_topk_clone = _compute_threshold(clone_values, topk_clone, pct_for_selection, base_threshold)
+                    thr_split, used_topk_split = _compute_threshold(split_values, topk_split, pct_for_selection, base_threshold)
+
+                    sel_mask_clone = None
+                    sel_mask_split = None
+                    if force_no_densify:
+                        sel_mask_clone = torch.zeros(num_pts, device=mean_norm.device, dtype=torch.bool)
+                        sel_mask_split = torch.zeros(num_pts, device=var_norm.device, dtype=torch.bool)
+                    if used_topk_clone > 0 and clone_values.numel() > 0:
+                        valid_clone_idx = torch.nonzero(valid_clone, as_tuple=False).squeeze(-1)
+                        if valid_clone_idx.numel() > 0:
+                            clone_vals = mean_norm[valid_clone_idx]
+                            k_clone = min(used_topk_clone, clone_vals.numel())
+                            if k_clone > 0:
+                                topk_sub_idx = torch.topk(clone_vals, k_clone, largest=True, sorted=True).indices
+                                topk_idx = valid_clone_idx[topk_sub_idx]
+                                sel_mask_clone = torch.zeros(num_pts, device=mean_norm.device, dtype=torch.bool)
+                                sel_mask_clone[topk_idx] = True
+                    if used_topk_split > 0 and split_values.numel() > 0:
+                        valid_split_idx = torch.nonzero(valid_split, as_tuple=False).squeeze(-1)
+                        if valid_split_idx.numel() > 0:
+                            split_vals = var_norm[valid_split_idx]
+                            k_split = min(used_topk_split, split_vals.numel())
+                            if k_split > 0:
+                                topk_sub_idx = torch.topk(split_vals, k_split, largest=True, sorted=True).indices
+                                topk_idx = valid_split_idx[topk_sub_idx]
+                                sel_mask_split = torch.zeros(num_pts, device=var_norm.device, dtype=torch.bool)
+                                sel_mask_split[topk_idx] = True
 
                     last_eff_threshold_clone = thr_clone
                     last_eff_threshold_split = thr_split
@@ -397,6 +522,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             grads_override=fw_mean_grads,
                             grads_override_split=fw_var_grads,
                             max_grad_split=thr_split,
+                            selected_mask_clone=sel_mask_clone,
+                            selected_mask_split=sel_mask_split,
+                            opacity_correction=True,
+                            max_primitives=opt.awsrm_max_primitives,
                         )
                     else:
                         stats = gaussians.densify_and_prune(base_threshold, 0.005, scene.cameras_extent, size_threshold, radii)

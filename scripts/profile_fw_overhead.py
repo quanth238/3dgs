@@ -51,9 +51,9 @@ def _adjoint_phi(image, gt_image):
     return diff.sum(dim=0, keepdim=True)
 
 
-def _adjoint_grad(view, gaussians, pipe, background, signal):
+def _adjoint_grad(view, gaussians, pipe, background, signal, use_trained_exp=False):
     aux = torch.ones((gaussians.get_xyz.shape[0], 3), device="cuda", requires_grad=True)
-    aux_img = render_aux(view, gaussians, pipe, override_color=aux)["render"]
+    aux_img = render_aux(view, gaussians, pipe, override_color=aux, use_trained_exp=use_trained_exp)["render"]
     if view.alpha_mask is not None:
         aux_img = aux_img * view.alpha_mask.cuda()
     loss = (aux_img * signal).sum()
@@ -100,7 +100,7 @@ def main():
 
     # Warmup
     view = random.choice(views)
-    render_pkg = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=False, return_aux=False)
+    render_pkg = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=args.train_test_exp, return_aux=False)
     image = render_pkg["render"]
     if view.alpha_mask is not None:
         image = image * view.alpha_mask.cuda()
@@ -110,9 +110,9 @@ def main():
     phi_scalar = _adjoint_phi(image, gt_image)
     phi = phi_scalar.repeat(3, 1, 1)
     ones = torch.ones_like(phi)
-    _ = _adjoint_grad(view, gaussians, pipe, background, phi)
-    _ = _adjoint_grad(view, gaussians, pipe, background, phi * phi)
-    _ = _adjoint_grad(view, gaussians, pipe, background, ones)
+    _ = _adjoint_grad(view, gaussians, pipe, background, phi, use_trained_exp=args.train_test_exp)
+    _ = _adjoint_grad(view, gaussians, pipe, background, phi * phi, use_trained_exp=args.train_test_exp)
+    _ = _adjoint_grad(view, gaussians, pipe, background, ones, use_trained_exp=args.train_test_exp)
     torch.cuda.synchronize()
 
     for _ in range(args.iters):
@@ -121,7 +121,7 @@ def main():
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        render_pkg = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=False, return_aux=False)
+        render_pkg = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=args.train_test_exp, return_aux=False)
         image = render_pkg["render"]
         if view.alpha_mask is not None:
             image = image * view.alpha_mask.cuda()
@@ -139,7 +139,7 @@ def main():
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        _ = _adjoint_grad(view, gaussians, pipe, background, phi)
+        _ = _adjoint_grad(view, gaussians, pipe, background, phi, use_trained_exp=args.train_test_exp)
         end.record()
         torch.cuda.synchronize()
         total_adj_m += start.elapsed_time(end)
@@ -147,7 +147,7 @@ def main():
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        _ = _adjoint_grad(view, gaussians, pipe, background, phi * phi)
+        _ = _adjoint_grad(view, gaussians, pipe, background, phi * phi, use_trained_exp=args.train_test_exp)
         end.record()
         torch.cuda.synchronize()
         total_adj_q += start.elapsed_time(end)
@@ -155,7 +155,7 @@ def main():
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        _ = _adjoint_grad(view, gaussians, pipe, background, ones)
+        _ = _adjoint_grad(view, gaussians, pipe, background, ones, use_trained_exp=args.train_test_exp)
         end.record()
         torch.cuda.synchronize()
         total_adj_z += start.elapsed_time(end)

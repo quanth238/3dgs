@@ -15,7 +15,7 @@ from arguments import ModelParams, PipelineParams, OptimizationParams, get_combi
 from scene import Scene
 from gaussian_renderer import render, render_aux, GaussianModel
 from utils.graphics_utils import geom_transform_points
-from utils.loss_utils import l1_loss, ssim
+from utils.loss_utils import l1_loss, ssim, create_window
 from utils.general_utils import safe_state
 
 
@@ -23,50 +23,82 @@ def ndc_to_pix(v, s):
     return ((v + 1.0) * s - 1.0) * 0.5
 
 
-def _adjoint_phi(image, gt_image):
+def _dssim_map(image, gt_image, window_size=11):
+    x = image.detach().unsqueeze(0)
+    y = gt_image.detach().unsqueeze(0)
+    channel = x.size(1)
+    window = create_window(window_size, channel).to(x.device).type_as(x)
+    mu1 = torch.nn.functional.conv2d(x, window, padding=window_size // 2, groups=channel)
+    mu2 = torch.nn.functional.conv2d(y, window, padding=window_size // 2, groups=channel)
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+    sigma1_sq = torch.nn.functional.conv2d(x * x, window, padding=window_size // 2, groups=channel) - mu1_sq
+    sigma2_sq = torch.nn.functional.conv2d(y * y, window, padding=window_size // 2, groups=channel) - mu2_sq
+    sigma12 = torch.nn.functional.conv2d(x * y, window, padding=window_size // 2, groups=channel) - mu1_mu2
+    c1 = 0.01 ** 2
+    c2 = 0.03 ** 2
+    ssim_map = ((2 * mu1_mu2 + c1) * (2 * sigma12 + c2)) / ((mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2))
+    dssim = (1.0 - ssim_map) * 0.5
+    return dssim.mean(dim=1, keepdim=True).squeeze(0)
+
+
+def _adjoint_phi(image, gt_image, error_type):
+    if error_type == "dssim":
+        return _dssim_map(image, gt_image)
+    if error_type == "l1":
+        diff = (image.detach() - gt_image).abs()
+        return diff.sum(dim=0, keepdim=True)
+    if image.grad is not None:
+        grad = image.grad.detach().abs()
+        return grad.sum(dim=0, keepdim=True)
     diff = (image.detach() - gt_image).abs()
     return diff.sum(dim=0, keepdim=True)
 
 
-def _adjoint_scores(view, gaussians, pipe, background, image, gt_image):
-    phi_scalar = _adjoint_phi(image, gt_image)
-    phi = phi_scalar.repeat(3, 1, 1)
-    ones = torch.ones_like(phi)
-
-    def _grad_for(signal):
-        aux = torch.ones((gaussians.get_xyz.shape[0], 3), device="cuda", requires_grad=True)
-        aux_img = render_aux(view, gaussians, pipe, override_color=aux)["render"]
-        if view.alpha_mask is not None:
-            aux_img = aux_img * view.alpha_mask.cuda()
-        loss = (aux_img * signal).sum()
-        grad = torch.autograd.grad(loss, aux, retain_graph=False, create_graph=False, allow_unused=False)[0]
-        return grad.sum(dim=-1)
+def _adjoint_scores(view, gaussians, pipe, background, image, gt_image, use_trained_exp=False, error_type="grad"):
+    phi = _adjoint_phi(image, gt_image, error_type)
+    w0 = torch.ones_like(phi)
+    w1 = phi
+    w2 = phi * phi
 
     with torch.enable_grad():
-        M = _grad_for(phi)
-        Q = _grad_for(phi * phi)
-        Z = _grad_for(ones)
+        aux = torch.ones((gaussians.get_xyz.shape[0], 3), device="cuda", requires_grad=True)
+        aux_pkg = render_aux(view, gaussians, pipe, override_color=aux, use_trained_exp=use_trained_exp)
+        aux_img = aux_pkg["render"]
+        if view.alpha_mask is not None:
+            aux_img = aux_img * view.alpha_mask.cuda()
+        loss = (aux_img[0] * w0 + aux_img[1] * w1 + aux_img[2] * w2).sum()
+        grad = torch.autograd.grad(loss, aux, retain_graph=False, create_graph=False, allow_unused=False)[0]
 
-    M = M.clamp_min(0.0)
-    Q = Q.clamp_min(0.0)
-    Z = Z.clamp_min(0.0)
+    Z = grad[:, 0].clamp_min(0.0)
+    M = grad[:, 1].clamp_min(0.0)
+    Q = grad[:, 2].clamp_min(0.0)
     return M, Q, Z
 
 
 def compute_adjoint_score_for_view(view, gaussians, pipe, opt, background):
-    render_pkg = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=False, return_aux=False)
+    use_trained_exp = getattr(opt, "train_test_exp", False)
+    error_type = getattr(opt, "awsrm_error_type", "grad")
+    render_pkg = render(view, gaussians, pipe, background, separate_sh=False, use_trained_exp=use_trained_exp, return_aux=False)
     image = render_pkg["render"]
     if view.alpha_mask is not None:
         image = image * view.alpha_mask.cuda()
 
     gt_image = view.original_image.cuda()
+    if view.alpha_mask is not None:
+        gt_image = gt_image * view.alpha_mask.cuda()
     Ll1 = l1_loss(image, gt_image)
     ssim_value = ssim(image, gt_image)
     loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+    try:
+        image.retain_grad()
+    except Exception:
+        pass
     loss.backward()
 
     residual_img = (image.detach() - gt_image).abs()
-    M, Q, Z = _adjoint_scores(view, gaussians, pipe, background, image, gt_image)
+    M, Q, Z = _adjoint_scores(view, gaussians, pipe, background, image, gt_image, use_trained_exp=use_trained_exp, error_type=error_type)
 
     return render_pkg, image.detach(), residual_img, M, Q, Z
 

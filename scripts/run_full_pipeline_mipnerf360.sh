@@ -14,6 +14,14 @@ DENSIFY_TOPK_RATIO="${DENSIFY_TOPK_RATIO:-0.05}"
 DENSIFY_UNTIL_ITER="${DENSIFY_UNTIL_ITER:-27000}"
 DENSIFY_FROM_ITER="${DENSIFY_FROM_ITER:-500}"
 DENSIFY_INTERVAL="${DENSIFY_INTERVAL:-100}"
+AWSRM_COLLECT_EVERY="${AWSRM_COLLECT_EVERY:-0}"
+AWSRM_ERROR_TYPE="${AWSRM_ERROR_TYPE:-l1}"
+AWSRM_MAX_PRIMITIVES="${AWSRM_MAX_PRIMITIVES:-6300000}"
+AWSRM_USE_MOMENTS="${AWSRM_USE_MOMENTS:-1}"
+AWSRM_K_CLONE="${AWSRM_K_CLONE:-0}"
+AWSRM_K_SPLIT="${AWSRM_K_SPLIT:-0}"
+AWSRM_CLONE_FRAC="${AWSRM_CLONE_FRAC:-0.0}"
+AWSRM_SPLIT_FRAC="${AWSRM_SPLIT_FRAC:-0.0}"
 FORCE_BASELINE="${FORCE_BASELINE:-0}"
 RUN_VALIDATE_ONLY="${RUN_VALIDATE_ONLY:-0}"
 RUN_MINIMAL="${RUN_MINIMAL:-1}"
@@ -109,7 +117,15 @@ if [[ "${RUN_VALIDATE_ONLY}" != "1" ]]; then
     --densify_grad_percentile "${DENSIFY_GRAD_PERCENTILE}" \
     --densify_topk "${DENSIFY_TOPK}" --densify_topk_ratio "${DENSIFY_TOPK_RATIO}" \
     --densify_until_iter "${DENSIFY_UNTIL_ITER}" \
-    --fw_densify
+    --fw_densify \
+    --awsrm_collect_every "${AWSRM_COLLECT_EVERY}" \
+    --awsrm_error_type "${AWSRM_ERROR_TYPE}" \
+    --awsrm_max_primitives "${AWSRM_MAX_PRIMITIVES}" \
+    --awsrm_use_moments "${AWSRM_USE_MOMENTS}" \
+    --awsrm_K_clone "${AWSRM_K_CLONE}" \
+    --awsrm_K_split "${AWSRM_K_SPLIT}" \
+    --awsrm_clone_frac "${AWSRM_CLONE_FRAC}" \
+    --awsrm_split_frac "${AWSRM_SPLIT_FRAC}"
 else
   echo "==> Skip FW training (RUN_VALIDATE_ONLY=1)"
 fi

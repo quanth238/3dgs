@@ -1,9 +1,5 @@
 {
-  "corr_fw_featgrad": 0.17012088000774384,
-  "corr_abs_featgrad": 0.19603581726551056,
-  "corr_mean2d_featgrad": 0.6999208927154541,
-  "corr_weight_norm_featgrad": 0.05067163705825806,
-  "corr_unweight_norm_featgrad": 0.17482984066009521,
-  "corr_weight_sumnorm_featgrad": 0.05842985957860947,
-  "corr_gated_fw_featgrad": 0.7046657204627991
+  "corr_clone_featgrad": 0.8671268224716187,
+  "corr_split_featgrad": 0.8178253769874573,
+  "corr_mean2d_featgrad": 0.7580865025520325
 }
