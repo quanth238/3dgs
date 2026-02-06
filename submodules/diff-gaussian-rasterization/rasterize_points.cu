@@ -399,8 +399,8 @@ __global__ void computeFwScoreKernel(
 	float s2 = 0.0f;
 	float sum_w = 0.0f;
 	float sum_e = 0.0f;
-	const bool use_weight = (score_mode >= 3);
-	const bool use_energy = (score_mode == 2 || score_mode == 4);
+	const bool use_weight = (score_mode == 3 || score_mode == 4 || score_mode == 5);
+	const bool use_energy = (score_mode == 2 || score_mode == 4 || score_mode == 5);
 	const float2 mean = means2D[idx];
 	const float4 conic = conic_opacity[idx];
 	for (uint32_t j = 0; j < count; ++j)
@@ -454,6 +454,18 @@ __global__ void computeFwScoreKernel(
 		const float inv = 1.0f / sum_w;
 		s0 *= inv; s1 *= inv; s2 *= inv;
 		out_score[idx] = sqrtf(s0 * s0 + s1 * s1 + s2 * s2);
+		return;
+	}
+
+	if (score_mode == 5)
+	{
+		const float inv = 1.0f / sum_w;
+		const float m0 = s0 * inv;
+		const float m1 = s1 * inv;
+		const float m2 = s2 * inv;
+		const float mean_e = sum_e * inv;
+		const float var = mean_e - (m0 * m0 + m1 * m1 + m2 * m2);
+		out_score[idx] = sqrtf(fmaxf(var, 0.0f));
 		return;
 	}
 
