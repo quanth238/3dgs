@@ -105,9 +105,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_Ll1depth_for_log = 0.0
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
-    last_eff_threshold = opt.densify_grad_threshold
-    last_eff_pct = _effective_percentile(opt, first_iter)
-    last_eff_topk = int(getattr(opt, "densify_topk", 0) or 0)
+    last_eff_threshold_clone = opt.densify_grad_threshold
+    last_eff_threshold_split = opt.densify_grad_threshold
+    last_eff_pct_clone = _effective_percentile(opt, first_iter)
+    last_eff_pct_split = last_eff_pct_clone
+    last_eff_topk_clone = int(getattr(opt, "densify_topk", 0) or 0)
+    last_eff_topk_split = last_eff_topk_clone
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
         if network_gui.conn == None:
@@ -199,20 +202,30 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         iter_end.record()
 
         with torch.no_grad():
-            fw_score = None
+            fw_mean = None
+            fw_var = None
             if need_fw_stats:
                 residual_img = image.grad.detach()
                 tile_residual, tile_energy = compute_tile_moments(residual_img)
                 _, H, W = residual_img.shape
                 tiles_x = (W + 16 - 1) // 16
-                fw_score = compute_fw_score(
+                fw_mean = compute_fw_score(
                     tile_residual,
                     tile_energy,
                     tiles_x,
                     radii,
                     render_pkg["geomBuffer"],
                     render_pkg["binningBuffer"],
-                    opt.fw_norm_mode,
+                    3,
+                )
+                fw_var = compute_fw_score(
+                    tile_residual,
+                    tile_energy,
+                    tiles_x,
+                    radii,
+                    render_pkg["geomBuffer"],
+                    render_pkg["binningBuffer"],
+                    5,
                 )
 
             # Progress bar
@@ -236,56 +249,80 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 if opt.fw_densify:
                     if need_fw_stats:
-                        gaussians.add_fw_stats(fw_score, visibility_filter)
+                        gaussians.add_fw_stats(fw_mean, fw_var, visibility_filter)
                 else:
                     gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 if opt.fw_densify:
                     denom_raw = gaussians.fw_denom
                     denom = denom_raw.clamp_min(1.0)
-                    grads_for_count = gaussians.fw_score_accum / denom
+                    mean_scores = gaussians.fw_mean_accum / denom
+                    var_scores = gaussians.fw_var_accum / denom
                 else:
                     denom_raw = gaussians.denom
                     denom = denom_raw.clamp_min(1.0)
-                    grads_for_count = gaussians.xyz_gradient_accum / denom
-                grads_for_count = grads_for_count.squeeze()
-                grads_for_count[grads_for_count.isnan()] = 0.0
-                if grads_for_count.dim() == 1:
-                    grad_norm = grads_for_count.abs()
+                    mean_scores = gaussians.xyz_gradient_accum / denom
+                    var_scores = mean_scores
+
+                mean_scores = mean_scores.squeeze()
+                var_scores = var_scores.squeeze()
+                mean_scores[mean_scores.isnan()] = 0.0
+                var_scores[var_scores.isnan()] = 0.0
+                if mean_scores.dim() == 1:
+                    mean_norm = mean_scores.abs()
                 else:
-                    grad_norm = torch.norm(grads_for_count, dim=-1)
+                    mean_norm = torch.norm(mean_scores, dim=-1)
+                if var_scores.dim() == 1:
+                    var_norm = var_scores.abs()
+                else:
+                    var_norm = torch.norm(var_scores, dim=-1)
                 denom_valid = denom_raw.squeeze() > 0
-                valid_mask = torch.logical_and(denom_valid, grad_norm > 0)
-                valid_norm = grad_norm[valid_mask]
+                scale_max = gaussians.get_scaling.max(dim=1).values
+                clone_mask = scale_max <= gaussians.percent_dense * scene.cameras_extent
+                split_mask = scale_max > gaussians.percent_dense * scene.cameras_extent
+                valid_clone = torch.logical_and(denom_valid, torch.logical_and(mean_norm > 0, clone_mask))
+                valid_split = torch.logical_and(denom_valid, torch.logical_and(var_norm > 0, split_mask))
+                valid_clone_norm = mean_norm[valid_clone]
+                valid_split_norm = var_norm[valid_split]
 
                 if iteration % 200 == 0:
                     num_pts = int(gaussians.get_xyz.shape[0])
                     mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
                     mem_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
-                    p90 = float(torch.quantile(valid_norm, 0.90).item()) if valid_norm.numel() > 0 else 0.0
-                    p95 = float(torch.quantile(valid_norm, 0.95).item()) if valid_norm.numel() > 0 else 0.0
-                    p99 = float(torch.quantile(valid_norm, 0.99).item()) if valid_norm.numel() > 0 else 0.0
-                    scale_max = gaussians.get_scaling.max(dim=1).values
+                    if valid_clone_norm.numel() > 0 and valid_split_norm.numel() > 0:
+                        valid_all = torch.cat([valid_clone_norm, valid_split_norm], dim=0)
+                    elif valid_clone_norm.numel() > 0:
+                        valid_all = valid_clone_norm
+                    else:
+                        valid_all = valid_split_norm
+                    p90 = float(torch.quantile(valid_all, 0.90).item()) if valid_all.numel() > 0 else 0.0
+                    p95 = float(torch.quantile(valid_all, 0.95).item()) if valid_all.numel() > 0 else 0.0
+                    p99 = float(torch.quantile(valid_all, 0.99).item()) if valid_all.numel() > 0 else 0.0
                     sel_clone = torch.logical_and(
-                        grad_norm >= last_eff_threshold,
-                        scale_max <= gaussians.percent_dense * scene.cameras_extent
+                        mean_norm >= last_eff_threshold_clone,
+                        clone_mask
                     )
                     sel_split = torch.logical_and(
-                        grad_norm >= last_eff_threshold,
-                        scale_max > gaussians.percent_dense * scene.cameras_extent
+                        var_norm >= last_eff_threshold_split,
+                        split_mask
                     )
                     sel_count = int((sel_clone | sel_split).sum().item())
                     sel_ratio = sel_count / max(1, num_pts)
-                    valid_count = int(valid_norm.numel())
+                    valid_clone_count = int(valid_clone_norm.numel())
+                    valid_split_count = int(valid_split_norm.numel())
+                    valid_count = valid_clone_count + valid_split_count
                     valid_ratio = valid_count / max(1, num_pts)
-                    pct_msg = f" pct={last_eff_pct:.3f}" if last_eff_pct > 0 else ""
-                    topk_msg = f" topk={last_eff_topk}" if last_eff_topk > 0 else ""
+                    pct_clone_msg = f" pct_c={last_eff_pct_clone:.3f}" if last_eff_pct_clone > 0 else ""
+                    pct_split_msg = f" pct_s={last_eff_pct_split:.3f}" if last_eff_pct_split > 0 else ""
+                    topk_clone_msg = f" topk_c={last_eff_topk_clone}" if last_eff_topk_clone > 0 else ""
+                    topk_split_msg = f" topk_s={last_eff_topk_split}" if last_eff_topk_split > 0 else ""
                     msg = (
                         f"[ITER {iteration}] points={num_pts} "
                         f"sel={sel_count} ({sel_ratio:.4f}) "
                         f"valid={valid_count} ({valid_ratio:.4f}) "
                         f"clone={int(sel_clone.sum().item())} split={int(sel_split.sum().item())} "
-                        f"thr={last_eff_threshold:.6f}{pct_msg}{topk_msg} "
+                        f"thr_c={last_eff_threshold_clone:.6f}{pct_clone_msg}{topk_clone_msg} "
+                        f"thr_s={last_eff_threshold_split:.6f}{pct_split_msg}{topk_split_msg} "
                         f"p90={p90:.6f} p95={p95:.6f} p99={p99:.6f} "
                         f"mem_alloc={mem_alloc:.2f}G mem_reserved={mem_reserved:.2f}G"
                     )
@@ -293,35 +330,51 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    eff_threshold = opt.densify_grad_threshold
+                    base_threshold = opt.densify_grad_threshold
                     eff_pct = _effective_percentile(opt, iteration)
                     eff_topk = int(getattr(opt, "densify_topk", 0) or 0)
                     eff_topk_ratio = float(getattr(opt, "densify_topk_ratio", 0.0) or 0.0)
+
+                    def _compute_threshold(values, topk, pct, default_thr):
+                        if values.numel() == 0:
+                            return float("inf"), 0
+                        if topk > 0:
+                            if values.numel() > topk:
+                                thr = float(torch.topk(values, topk, largest=True, sorted=True).values[-1].item())
+                            else:
+                                thr = float("-inf")
+                            return thr, topk
+                        if pct > 0.0:
+                            return float(torch.quantile(values, pct).item()), 0
+                        return default_thr, 0
+
+                    clone_values = valid_clone_norm
+                    split_values = valid_split_norm
+                    topk_clone = eff_topk
+                    topk_split = eff_topk
                     if eff_topk_ratio > 0.0:
-                        eff_topk = int(valid_norm.numel() * eff_topk_ratio)
+                        topk_clone = int(clone_values.numel() * eff_topk_ratio)
+                        topk_split = int(split_values.numel() * eff_topk_ratio)
+                        if clone_values.numel() > 0 and topk_clone == 0:
+                            topk_clone = 1
+                        if split_values.numel() > 0 and topk_split == 0:
+                            topk_split = 1
 
-                    if eff_topk > 0:
-                        if valid_norm.numel() > eff_topk:
-                            eff_threshold = float(torch.topk(valid_norm, eff_topk, largest=True, sorted=True).values[-1].item())
-                        elif valid_norm.numel() > 0:
-                            eff_threshold = float("-inf")
-                        else:
-                            eff_threshold = float("inf")
-                        eff_pct = 0.0
-                    elif eff_pct > 0.0:
-                        if valid_norm.numel() > 0:
-                            eff_threshold = float(torch.quantile(valid_norm, eff_pct).item())
-                        else:
-                            eff_threshold = float("inf")
+                    thr_clone, used_topk_clone = _compute_threshold(clone_values, topk_clone, eff_pct, base_threshold)
+                    thr_split, used_topk_split = _compute_threshold(split_values, topk_split, eff_pct, base_threshold)
 
-                    last_eff_threshold = eff_threshold
-                    last_eff_pct = eff_pct
-                    last_eff_topk = eff_topk
+                    last_eff_threshold_clone = thr_clone
+                    last_eff_threshold_split = thr_split
+                    last_eff_pct_clone = eff_pct if used_topk_clone == 0 else 0.0
+                    last_eff_pct_split = eff_pct if used_topk_split == 0 else 0.0
+                    last_eff_topk_clone = used_topk_clone
+                    last_eff_topk_split = used_topk_split
                     if opt.fw_densify:
-                        fw_grads = gaussians.fw_score_accum / gaussians.fw_denom.clamp_min(1.0)
-                        gaussians.densify_and_prune(eff_threshold, 0.005, scene.cameras_extent, size_threshold, radii, grads_override=fw_grads)
+                        fw_mean_grads = gaussians.fw_mean_accum / gaussians.fw_denom.clamp_min(1.0)
+                        fw_var_grads = gaussians.fw_var_accum / gaussians.fw_denom.clamp_min(1.0)
+                        gaussians.densify_and_prune(thr_clone, 0.005, scene.cameras_extent, size_threshold, radii, grads_override=fw_mean_grads, grads_override_split=fw_var_grads, max_grad_split=thr_split)
                     else:
-                        gaussians.densify_and_prune(eff_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
+                        gaussians.densify_and_prune(base_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()

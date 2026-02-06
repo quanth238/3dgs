@@ -12,6 +12,7 @@ DENSIFY_GRAD_PERCENTILE="${DENSIFY_GRAD_PERCENTILE:-0.0}"
 FW_NORM_MODE="${FW_NORM_MODE:-5}"
 DENSIFY_TOPK="${DENSIFY_TOPK:-0}"
 DENSIFY_TOPK_RATIO="${DENSIFY_TOPK_RATIO:-0.01}"
+DENSIFY_UNTIL_ITER="${DENSIFY_UNTIL_ITER:-27000}"
 FORCE_BASELINE="${FORCE_BASELINE:-0}"
 RUN_MINIMAL="${RUN_MINIMAL:-1}"
 MINIMAL_STEPS="${MINIMAL_STEPS:-60}"
@@ -66,6 +67,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python train.py -s "${SRC}" -i "$
   --disable_viewer --quiet --eval --iterations "${ITERATIONS}" --data_device "${DATA_DEVICE}" \
   --densify_grad_percentile "${DENSIFY_GRAD_PERCENTILE}" \
   --densify_topk "${DENSIFY_TOPK}" --densify_topk_ratio "${DENSIFY_TOPK_RATIO}" \
+  --densify_until_iter "${DENSIFY_UNTIL_ITER}" \
   --fw_norm_mode "${FW_NORM_MODE}" \
   --fw_densify
 

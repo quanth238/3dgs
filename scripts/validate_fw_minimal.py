@@ -197,10 +197,12 @@ def densify_effect_test(dataset, pipe, opt, background, steps, use_fw):
                 tile_residual, tile_energy = compute_tile_moments(residual_img)
                 _, H, W = residual_img.shape
                 tiles_x = (W + 16 - 1) // 16
-                fw_score = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], opt.fw_norm_mode)
-                gaussians.add_fw_stats(fw_score, render_pkg["visibility_filter"])
-                fw_grads = gaussians.fw_score_accum / gaussians.fw_denom
-                gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, None, render_pkg["radii"], grads_override=fw_grads)
+                fw_mean = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 3)
+                fw_var = compute_fw_score(tile_residual, tile_energy, tiles_x, render_pkg["radii"], render_pkg["geomBuffer"], render_pkg["binningBuffer"], 5)
+                gaussians.add_fw_stats(fw_mean, fw_var, render_pkg["visibility_filter"])
+                fw_mean_grads = gaussians.fw_mean_accum / gaussians.fw_denom
+                fw_var_grads = gaussians.fw_var_accum / gaussians.fw_denom
+                gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, None, render_pkg["radii"], grads_override=fw_mean_grads, grads_override_split=fw_var_grads, max_grad_split=opt.densify_grad_threshold)
             else:
                 gaussians.add_densification_stats(render_pkg["viewspace_points"], render_pkg["visibility_filter"])
                 gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, None, render_pkg["radii"])

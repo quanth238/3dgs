@@ -7,11 +7,12 @@ IMAGES="${IMAGES:-images_4}"
 ITERATIONS="${ITERATIONS:-30000}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-3}"
 export CUDA_VISIBLE_DEVICES
-DATA_DEVICE="${DATA_DEVICE:-cpu}"
+DATA_DEVICE="${DATA_DEVICE:-cuda}"
 DENSIFY_GRAD_PERCENTILE="${DENSIFY_GRAD_PERCENTILE:-0.0}"
 FW_NORM_MODE="${FW_NORM_MODE:-5}"
 DENSIFY_TOPK="${DENSIFY_TOPK:-0}"
 DENSIFY_TOPK_RATIO="${DENSIFY_TOPK_RATIO:-0.05}"
+DENSIFY_UNTIL_ITER="${DENSIFY_UNTIL_ITER:-27000}"
 FORCE_BASELINE="${FORCE_BASELINE:-0}"
 RUN_VALIDATE_ONLY="${RUN_VALIDATE_ONLY:-0}"
 RUN_MINIMAL="${RUN_MINIMAL:-1}"
@@ -117,6 +118,7 @@ if [[ "${RUN_VALIDATE_ONLY}" != "1" ]]; then
     --disable_viewer --quiet --eval --iterations "${ITERATIONS}" --data_device "${DATA_DEVICE}" \
     --densify_grad_percentile "${DENSIFY_GRAD_PERCENTILE}" \
     --densify_topk "${DENSIFY_TOPK}" --densify_topk_ratio "${DENSIFY_TOPK_RATIO}" \
+    --densify_until_iter "${DENSIFY_UNTIL_ITER}" \
     --fw_norm_mode "${FW_NORM_MODE}" \
     --fw_densify
 else
