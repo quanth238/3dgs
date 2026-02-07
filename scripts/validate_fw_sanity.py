@@ -79,8 +79,15 @@ def _adjoint_phi(image, gt_image, error_type):
     return diff.sum(dim=0, keepdim=True)
 
 
-def _adjoint_score(view, gaussians, pipe, background, image, gt_image, use_trained_exp=False, error_type="grad", eps=1e-6):
+def _adjoint_score(view, gaussians, pipe, background, image, gt_image, use_trained_exp=False, error_type="grad", eps=1e-6, depth_map=None, depth_weight_gamma=0.0):
     phi = _adjoint_phi(image, gt_image, error_type)
+    if depth_map is not None and depth_weight_gamma != 0.0:
+        depth = 1.0 / (depth_map.detach().clamp_min(1e-6))
+        depth_valid = depth[depth > 0]
+        if depth_valid.numel() > 0:
+            depth_median = depth_valid.median()
+            depth_weight = (depth / (depth_median + 1e-6)).pow(depth_weight_gamma).clamp(0.25, 4.0)
+            phi = phi * depth_weight
     w0 = torch.ones_like(phi)
     w1 = phi
 
@@ -94,8 +101,13 @@ def _adjoint_score(view, gaussians, pipe, background, image, gt_image, use_train
         grad = torch.autograd.grad(loss, aux, retain_graph=False, create_graph=False, allow_unused=False)[0]
 
     mu_raw = grad[:, 1] / (grad[:, 0] + eps)
-    severity_eta = 0.5
-    score = mu_raw * (grad[:, 0] + eps).pow(1.0 - severity_eta)
+    severity_eta = float(getattr(opt, "awsrm_severity_eta", 0.5))
+    denom_scale = grad[:, 0] + eps
+    if denom_scale.numel() > 0:
+        median_denom = denom_scale[denom_scale > 0].median() if (denom_scale > 0).any() else denom_scale.median()
+        lambda_denom = max(eps, float(median_denom) * 0.1)
+        denom_scale = denom_scale + lambda_denom
+    score = mu_raw * denom_scale.pow(1.0 - severity_eta)
     return score
 
 def _rankdata(x: torch.Tensor) -> torch.Tensor:
@@ -181,7 +193,12 @@ def main():
 
         error_type = getattr(opt_args, "awsrm_error_type", "grad")
         eps = float(getattr(opt_args, "awsrm_eps", 1e-6))
-        fw_score = _adjoint_score(view, gaussians, pipe, background, image, gt_image, use_trained_exp=False, error_type=error_type, eps=eps)
+        fw_score = _adjoint_score(
+            view, gaussians, pipe, background, image, gt_image,
+            use_trained_exp=False, error_type=error_type, eps=eps,
+            depth_map=render_pkg.get("depth"),
+            depth_weight_gamma=float(getattr(opt_args, "awsrm_depth_weight_gamma", 0.0) or 0.0),
+        )
 
         feat_dc = gaussians._features_dc.grad
         feat_rest = gaussians._features_rest.grad

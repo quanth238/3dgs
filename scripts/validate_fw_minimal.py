@@ -56,8 +56,15 @@ def _adjoint_phi(image, gt_image, error_type):
     return diff.sum(dim=0, keepdim=True)
 
 
-def _adjoint_scores(view, gaussians, pipe, background, image, gt_image, use_trained_exp=False, error_type="grad"):
+def _adjoint_scores(view, gaussians, pipe, background, image, gt_image, use_trained_exp=False, error_type="grad", depth_map=None, depth_weight_gamma=0.0):
     phi = _adjoint_phi(image, gt_image, error_type)
+    if depth_map is not None and depth_weight_gamma != 0.0:
+        depth = 1.0 / (depth_map.detach().clamp_min(1e-6))
+        depth_valid = depth[depth > 0]
+        if depth_valid.numel() > 0:
+            depth_median = depth_valid.median()
+            depth_weight = (depth / (depth_median + 1e-6)).pow(depth_weight_gamma).clamp(0.25, 4.0)
+            phi = phi * depth_weight
     w0 = torch.ones_like(phi)
     w1 = phi
 
@@ -96,7 +103,12 @@ def compute_adjoint_score_for_view(view, gaussians, pipe, opt, background):
     loss.backward()
 
     residual_img = (image.detach() - gt_image).abs()
-    M, Z = _adjoint_scores(view, gaussians, pipe, background, image, gt_image, use_trained_exp=False, error_type=error_type)
+    M, Z = _adjoint_scores(
+        view, gaussians, pipe, background, image, gt_image,
+        use_trained_exp=False, error_type=error_type,
+        depth_map=render_pkg.get("depth"),
+        depth_weight_gamma=float(getattr(opt, "awsrm_depth_weight_gamma", 0.0) or 0.0),
+    )
 
     return render_pkg, image.detach(), residual_img, M, Z
 
@@ -143,9 +155,14 @@ def score_heatmap_sanity(scene, pipe, opt, background, topk, out_dir):
     clone_mask = scale_max <= scene.gaussians.percent_dense * scene.cameras_extent
     split_mask = scale_max > scene.gaussians.percent_dense * scene.cameras_extent
     eps = 1e-8
-    severity_eta = 0.5
+    severity_eta = float(getattr(opt, "awsrm_severity_eta", 0.5))
     mu_raw = M / (Z + eps)
-    clone_score = mu_raw * (Z + eps).pow(1.0 - severity_eta)
+    denom_scale = Z + eps
+    if denom_scale.numel() > 0:
+        median_denom = denom_scale[denom_scale > 0].median() if (denom_scale > 0).any() else denom_scale.median()
+        lambda_denom = max(eps, float(median_denom) * 0.1)
+        denom_scale = denom_scale + lambda_denom
+    clone_score = mu_raw * denom_scale.pow(1.0 - severity_eta)
     split_score = render_pkg["viewspace_points"].grad[:, :2].abs().sum(dim=-1)
     split_score = split_score * render_pkg["radii"].clamp_min(1.0)
     combined_score = torch.where(clone_mask, clone_score, split_score)
@@ -200,9 +217,19 @@ def topk_stability(scene, pipe, opt, background, topk):
     clone_mask = scale_max <= scene.gaussians.percent_dense * scene.cameras_extent
     split_mask = scale_max > scene.gaussians.percent_dense * scene.cameras_extent
     eps = 1e-8
-    severity_eta = 0.5
-    mu1 = (M1 / (Z1 + eps)) * (Z1 + eps).pow(1.0 - severity_eta)
-    mu2 = (M2 / (Z2 + eps)) * (Z2 + eps).pow(1.0 - severity_eta)
+    severity_eta = float(getattr(opt, "awsrm_severity_eta", 0.5))
+    denom1 = Z1 + eps
+    denom2 = Z2 + eps
+    if denom1.numel() > 0:
+        median_d1 = denom1[denom1 > 0].median() if (denom1 > 0).any() else denom1.median()
+        lambda_d1 = max(eps, float(median_d1) * 0.1)
+        denom1 = denom1 + lambda_d1
+    if denom2.numel() > 0:
+        median_d2 = denom2[denom2 > 0].median() if (denom2 > 0).any() else denom2.median()
+        lambda_d2 = max(eps, float(median_d2) * 0.1)
+        denom2 = denom2 + lambda_d2
+    mu1 = (M1 / (Z1 + eps)) * denom1.pow(1.0 - severity_eta)
+    mu2 = (M2 / (Z2 + eps)) * denom2.pow(1.0 - severity_eta)
     split1 = render1["viewspace_points"].grad[:, :2].abs().sum(dim=-1) * render1["radii"].clamp_min(1.0)
     split2 = render2["viewspace_points"].grad[:, :2].abs().sum(dim=-1) * render2["radii"].clamp_min(1.0)
     score1 = torch.where(clone_mask, mu1, split1)
@@ -263,14 +290,22 @@ def densify_effect_test(dataset, pipe, opt, background, steps, use_fw):
                 render_pkg["radii"][render_pkg["visibility_filter"]]
             )
             if use_fw:
-                fw_M, fw_Z = _adjoint_scores(viewpoint_cam, gaussians, pipe, background, image, gt_image)
+                fw_M, fw_Z = _adjoint_scores(
+                    viewpoint_cam, gaussians, pipe, background, image, gt_image,
+                    depth_map=render_pkg.get("depth"),
+                    depth_weight_gamma=float(getattr(opt, "awsrm_depth_weight_gamma", 0.0) or 0.0),
+                )
                 eps = 1e-8
                 mu_view = fw_M / (fw_Z + eps)
                 split_view = render_pkg["viewspace_points"].grad[:, :2].abs().sum(dim=-1, keepdim=True)
                 gaussians.add_fw_stats(mu_view, split_view, fw_Z, render_pkg["visibility_filter"], mode="max")
                 mean_scores = gaussians.fw_mean_accum.squeeze().abs()
-                severity_eta = 0.5
+                severity_eta = float(getattr(opt, "awsrm_severity_eta", 0.5))
                 denom_scale = fw_Z.squeeze().clamp_min(1e-6)
+                if denom_scale.numel() > 0:
+                    median_denom = denom_scale[denom_scale > 0].median() if (denom_scale > 0).any() else denom_scale.median()
+                    lambda_denom = max(1e-6, float(median_denom) * 0.1)
+                    denom_scale = denom_scale + lambda_denom
                 mean_scores = mean_scores * denom_scale.pow(1.0 - severity_eta)
                 var_scores = gaussians.fw_var_accum.squeeze().clamp_min(0.0)
                 var_scores = var_scores * gaussians.max_radii2D.clamp_min(1.0)

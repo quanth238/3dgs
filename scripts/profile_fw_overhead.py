@@ -51,12 +51,14 @@ def _adjoint_phi(image, gt_image):
     return diff.sum(dim=0, keepdim=True)
 
 
-def _adjoint_grad(view, gaussians, pipe, background, signal, use_trained_exp=False):
+def _adjoint_grad(view, gaussians, pipe, background, phi, use_trained_exp=False):
     aux = torch.ones((gaussians.get_xyz.shape[0], 3), device="cuda", requires_grad=True)
     aux_img = render_aux(view, gaussians, pipe, override_color=aux, use_trained_exp=use_trained_exp)["render"]
     if view.alpha_mask is not None:
         aux_img = aux_img * view.alpha_mask.cuda()
-    loss = (aux_img * signal).sum()
+    w0 = torch.ones_like(phi)
+    w1 = phi
+    loss = (aux_img[0] * w0 + aux_img[1] * w1).sum()
     grad = torch.autograd.grad(loss, aux, retain_graph=False, create_graph=False, allow_unused=False)[0]
     return grad.sum(dim=-1)
 
@@ -94,8 +96,6 @@ def main():
     views = scene.getTrainCameras()
     total_fw = 0.0
     total_adj_m = 0.0
-    total_adj_q = 0.0
-    total_adj_z = 0.0
     total_core = 0.0
 
     # Warmup
@@ -108,11 +108,7 @@ def main():
     loss = (1.0 - opt_args.lambda_dssim) * l1_loss(image, gt_image) + opt_args.lambda_dssim * (1.0 - ssim(image, gt_image))
     loss.backward()
     phi_scalar = _adjoint_phi(image, gt_image)
-    phi = phi_scalar.repeat(3, 1, 1)
-    ones = torch.ones_like(phi)
-    _ = _adjoint_grad(view, gaussians, pipe, background, phi, use_trained_exp=False)
-    _ = _adjoint_grad(view, gaussians, pipe, background, phi * phi, use_trained_exp=False)
-    _ = _adjoint_grad(view, gaussians, pipe, background, ones, use_trained_exp=False)
+    _ = _adjoint_grad(view, gaussians, pipe, background, phi_scalar, use_trained_exp=False)
     torch.cuda.synchronize()
 
     for _ in range(args.iters):
@@ -133,46 +129,23 @@ def main():
         total_core += start.elapsed_time(end)
 
         phi_scalar = _adjoint_phi(image, gt_image)
-        phi = phi_scalar.repeat(3, 1, 1)
-        ones = torch.ones_like(phi)
-
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        _ = _adjoint_grad(view, gaussians, pipe, background, phi, use_trained_exp=False)
+        _ = _adjoint_grad(view, gaussians, pipe, background, phi_scalar, use_trained_exp=False)
         end.record()
         torch.cuda.synchronize()
         total_adj_m += start.elapsed_time(end)
 
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        _ = _adjoint_grad(view, gaussians, pipe, background, phi * phi, use_trained_exp=False)
-        end.record()
-        torch.cuda.synchronize()
-        total_adj_q += start.elapsed_time(end)
-
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        _ = _adjoint_grad(view, gaussians, pipe, background, ones, use_trained_exp=False)
-        end.record()
-        torch.cuda.synchronize()
-        total_adj_z += start.elapsed_time(end)
-
     avg_core = total_core / args.iters
     avg_adj_m = total_adj_m / args.iters
-    avg_adj_q = total_adj_q / args.iters
-    avg_adj_z = total_adj_z / args.iters
-    avg_adj = avg_adj_m + avg_adj_q + avg_adj_z
+    avg_adj = avg_adj_m
     ratio = avg_adj / max(1e-6, avg_core)
 
     results = {
         "iters": args.iters,
         "avg_core_ms": avg_core,
         "avg_adj_m_ms": avg_adj_m,
-        "avg_adj_q_ms": avg_adj_q,
-        "avg_adj_z_ms": avg_adj_z,
         "avg_adj_ms": avg_adj,
         "fw_overhead_ratio": ratio,
     }

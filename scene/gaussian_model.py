@@ -63,6 +63,7 @@ class GaussianModel:
         self.fw_mean_accum = torch.empty(0)
         self.fw_var_accum = torch.empty(0)
         self.fw_denom = torch.empty(0)
+        self.fw_depth_accum = torch.empty(0)
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
@@ -83,6 +84,7 @@ class GaussianModel:
             self.fw_mean_accum,
             self.fw_var_accum,
             self.fw_denom,
+            self.fw_depth_accum,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
         )
@@ -137,6 +139,24 @@ class GaussianModel:
             fw_denom,
             opt_dict, 
             self.spatial_lr_scale) = model_args
+            fw_depth_accum = None
+        elif len(model_args) == 16:
+            (self.active_sh_degree, 
+            self._xyz, 
+            self._features_dc, 
+            self._features_rest,
+            self._scaling, 
+            self._rotation, 
+            self._opacity,
+            self.max_radii2D, 
+            xyz_gradient_accum, 
+            denom,
+            fw_mean_accum,
+            fw_var_accum,
+            fw_denom,
+            fw_depth_accum,
+            opt_dict, 
+            self.spatial_lr_scale) = model_args
         else:
             raise ValueError("Unexpected checkpoint format for GaussianModel.capture()")
         self.training_setup(training_args)
@@ -152,6 +172,10 @@ class GaussianModel:
             self.fw_var_accum = fw_var_accum
         else:
             self.fw_var_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        if fw_depth_accum is not None:
+            self.fw_depth_accum = fw_depth_accum
+        else:
+            self.fw_depth_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.optimizer.load_state_dict(opt_dict)
 
     @property
@@ -237,6 +261,7 @@ class GaussianModel:
         self.fw_mean_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.fw_var_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.fw_denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.fw_depth_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
@@ -421,6 +446,7 @@ class GaussianModel:
         self.fw_mean_accum = self.fw_mean_accum[valid_points_mask]
         self.fw_var_accum = self.fw_var_accum[valid_points_mask]
         self.fw_denom = self.fw_denom[valid_points_mask]
+        self.fw_depth_accum = self.fw_depth_accum[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
         self.tmp_radii = self.tmp_radii[valid_points_mask]
 
@@ -468,6 +494,7 @@ class GaussianModel:
         self.fw_mean_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.fw_var_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.fw_denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.fw_depth_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, selected_mask_override=None):
@@ -563,6 +590,7 @@ class GaussianModel:
         max_grad_split=None,
         selected_mask_clone=None,
         selected_mask_split=None,
+        protected_mask=None,
         opacity_correction=False,
         max_primitives=0,
     ):
@@ -601,6 +629,17 @@ class GaussianModel:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+        if protected_mask is not None:
+            if protected_mask.numel() < prune_mask.numel():
+                pad = torch.zeros(
+                    (prune_mask.numel() - protected_mask.numel(),),
+                    device=protected_mask.device,
+                    dtype=protected_mask.dtype,
+                )
+                protected_mask = torch.cat((protected_mask, pad), dim=0)
+            elif protected_mask.numel() > prune_mask.numel():
+                protected_mask = protected_mask[:prune_mask.numel()]
+            prune_mask = torch.logical_and(prune_mask, ~protected_mask)
         self.prune_points(prune_mask)
         n_after_prune = int(self.get_xyz.shape[0])
 
@@ -630,13 +669,15 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
 
-    def add_fw_stats(self, fw_mean, fw_var, fw_denom, update_filter, mode="sum"):
+    def add_fw_stats(self, fw_mean, fw_var, fw_denom, update_filter, mode="sum", fw_depth=None):
         if fw_mean.dim() == 1:
             fw_mean = fw_mean.unsqueeze(-1)
         if fw_var.dim() == 1:
             fw_var = fw_var.unsqueeze(-1)
         if fw_denom is not None and fw_denom.dim() == 1:
             fw_denom = fw_denom.unsqueeze(-1)
+        if fw_depth is not None and fw_depth.dim() == 1:
+            fw_depth = fw_depth.unsqueeze(-1)
         if mode == "max":
             self.fw_mean_accum[update_filter] = torch.maximum(
                 self.fw_mean_accum[update_filter], fw_mean[update_filter]
@@ -648,9 +689,15 @@ class GaussianModel:
                 self.fw_denom[update_filter] = torch.maximum(
                     self.fw_denom[update_filter], fw_denom[update_filter]
                 )
+            if fw_depth is not None:
+                self.fw_depth_accum[update_filter] = torch.maximum(
+                    self.fw_depth_accum[update_filter], fw_depth[update_filter]
+                )
         else:
             if fw_denom is None:
                 raise ValueError("fw_denom must be provided for sum accumulation")
             self.fw_mean_accum[update_filter] += fw_mean[update_filter]
             self.fw_var_accum[update_filter] += fw_var[update_filter]
             self.fw_denom[update_filter] += fw_denom[update_filter]
+            if fw_depth is not None:
+                self.fw_depth_accum[update_filter] += fw_depth[update_filter]

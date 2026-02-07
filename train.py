@@ -10,6 +10,7 @@
 #
 
 import os
+import math
 import torch
 import torch.nn.functional as F
 from random import randint
@@ -101,9 +102,16 @@ def _adjoint_phi(image, gt_image, error_type):
     return diff.sum(dim=0, keepdim=True)
 
 
-def _adjoint_scores(viewpoint_cam, gaussians, pipe, image, gt_image, use_trained_exp=False, error_type="grad"):
+def _adjoint_scores(viewpoint_cam, gaussians, pipe, image, gt_image, use_trained_exp=False, error_type="grad", depth_map=None, depth_weight_gamma=0.0):
     # Scalar error map (detached) used for attribution.
     phi = _adjoint_phi(image, gt_image, error_type)
+    if depth_map is not None and depth_weight_gamma != 0.0:
+        depth = 1.0 / (depth_map.detach().clamp_min(1e-6))
+        depth_valid = depth[depth > 0]
+        if depth_valid.numel() > 0:
+            depth_median = depth_valid.median()
+            depth_weight = (depth / (depth_median + 1e-6)).pow(depth_weight_gamma).clamp(0.25, 4.0)
+            phi = phi * depth_weight
     w0 = torch.ones_like(phi)
     w1 = phi
 
@@ -126,6 +134,95 @@ def _adjoint_scores(viewpoint_cam, gaussians, pipe, image, gt_image, use_trained
     Z = grad[:, 0]
     M = grad[:, 1]
     return M, Z, aux_pkg["visibility_filter"]
+
+
+def _compute_view_depths(viewpoint_cam, xyz):
+    device = xyz.device
+    dtype = xyz.dtype
+    ones = torch.ones((xyz.shape[0], 1), device=device, dtype=dtype)
+    xyz_h = torch.cat([xyz, ones], dim=1)
+    view = xyz_h @ viewpoint_cam.world_view_transform.to(device=device, dtype=dtype)
+    depth = view[:, 2].abs()
+    return depth
+
+
+def _depth_stratified_topk(scores, depths, k_total, num_bins=4, far_min_frac=0.4):
+    if k_total <= 0 or scores.numel() == 0:
+        return torch.empty((0,), device=scores.device, dtype=torch.long)
+
+    k_total = min(k_total, scores.numel())
+    num_bins = max(1, int(num_bins))
+    if num_bins == 1:
+        return torch.topk(scores, k_total, largest=True, sorted=True).indices
+
+    depth_vals = depths.clone()
+    depth_vals[depth_vals.isnan()] = 0.0
+    quantiles = torch.quantile(
+        depth_vals,
+        torch.linspace(0, 1, num_bins + 1, device=depth_vals.device, dtype=depth_vals.dtype)[1:-1],
+    )
+    bin_ids = torch.bucketize(depth_vals, quantiles)
+
+    score_sum = torch.zeros(num_bins, device=scores.device, dtype=scores.dtype)
+    for b in range(num_bins):
+        mask = bin_ids == b
+        if mask.any():
+            score_sum[b] = scores[mask].sum()
+    if score_sum.sum() > 0:
+        weights = score_sum / score_sum.sum()
+    else:
+        weights = torch.full((num_bins,), 1.0 / num_bins, device=scores.device, dtype=scores.dtype)
+
+    k_float = weights * float(k_total)
+    k_bin = torch.floor(k_float).long()
+    leftover = k_total - int(k_bin.sum().item())
+    if leftover > 0:
+        frac = k_float - k_bin.float()
+        _, order = torch.topk(frac, k=min(leftover, num_bins), largest=True, sorted=True)
+        k_bin[order] += 1
+
+    if far_min_frac > 0.0:
+        far_bins = list(range(max(0, num_bins - 2), num_bins))
+        min_far = int(math.ceil(k_total * far_min_frac))
+        cur_far = int(k_bin[far_bins].sum().item()) if far_bins else 0
+        if cur_far < min_far:
+            need = min_far - cur_far
+            for _ in range(need):
+                donors = [b for b in range(num_bins) if b not in far_bins and k_bin[b] > 0]
+                if not donors:
+                    break
+                donor = max(donors, key=lambda b: int(k_bin[b].item()))
+                far_scores = score_sum[far_bins]
+                far_pick = far_bins[int(torch.argmax(far_scores).item())]
+                k_bin[donor] -= 1
+                k_bin[far_pick] += 1
+
+    selected = []
+    for b in range(num_bins):
+        idx = torch.nonzero(bin_ids == b, as_tuple=False).squeeze(-1)
+        if idx.numel() == 0:
+            continue
+        k = min(int(k_bin[b].item()), idx.numel())
+        if k <= 0:
+            continue
+        topk_idx = torch.topk(scores[idx], k, largest=True, sorted=True).indices
+        selected.append(idx[topk_idx])
+
+    if selected:
+        selected_idx = torch.cat(selected)
+    else:
+        selected_idx = torch.empty((0,), device=scores.device, dtype=torch.long)
+
+    if selected_idx.numel() < k_total:
+        remaining = torch.ones(scores.numel(), device=scores.device, dtype=torch.bool)
+        remaining[selected_idx] = False
+        remaining_idx = torch.nonzero(remaining, as_tuple=False).squeeze(-1)
+        if remaining_idx.numel() > 0:
+            k_rem = min(k_total - selected_idx.numel(), remaining_idx.numel())
+            topk_rem = torch.topk(scores[remaining_idx], k_rem, largest=True, sorted=True).indices
+            selected_idx = torch.cat([selected_idx, remaining_idx[topk_rem]])
+
+    return selected_idx
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
@@ -272,7 +369,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if need_fw_stats:
                 fw_mean, fw_denom, fw_vis_filter = _adjoint_scores(
                     viewpoint_cam, gaussians, pipe, image, gt_image,
-                    use_trained_exp=False, error_type=opt.awsrm_error_type
+                    use_trained_exp=False, error_type=opt.awsrm_error_type,
+                    depth_map=render_pkg.get("depth"), depth_weight_gamma=float(getattr(opt, "awsrm_depth_weight_gamma", 0.0) or 0.0)
                 )
                 # Use max-over-views aggregation on normalized moments (AW-SRM++).
                 eps = float(getattr(opt, "awsrm_eps", 1e-6))
@@ -282,7 +380,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 else:
                     split_view = torch.zeros_like(mu_view)
                 update_filter = fw_vis_filter if fw_vis_filter is not None else visibility_filter
-                gaussians.add_fw_stats(mu_view, split_view, fw_denom, update_filter, mode="max")
+                depth_view = _compute_view_depths(viewpoint_cam, gaussians.get_xyz)
+                gaussians.add_fw_stats(mu_view, split_view, fw_denom, update_filter, mode="max", fw_depth=depth_view)
 
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -328,8 +427,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 mean_scores = mean_scores.squeeze()
                 var_scores = var_scores.squeeze()
                 if opt.fw_densify:
-                    severity_eta = 0.5
+                    severity_eta = float(getattr(opt, "awsrm_severity_eta", 0.5))
                     denom_scale = gaussians.fw_denom.squeeze().clamp_min(float(getattr(opt, "awsrm_eps", 1e-6)))
+                    if denom_scale.numel() > 0:
+                        median_denom = denom_scale[denom_scale > 0].median() if (denom_scale > 0).any() else denom_scale.median()
+                        lambda_denom = max(float(getattr(opt, "awsrm_eps", 1e-6)), float(median_denom) * 0.1)
+                        denom_scale = denom_scale + lambda_denom
                     mean_scores = mean_scores * denom_scale.pow(1.0 - severity_eta)
                 mean_scores[mean_scores.isnan()] = 0.0
                 var_scores[var_scores.isnan()] = 0.0
@@ -350,6 +453,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     denom_valid = gaussians.fw_denom.squeeze() > z_min
                 else:
                     denom_valid = denom_raw.squeeze() > 0
+                depth_bins = int(getattr(opt, "awsrm_depth_bins", 1) or 1)
+                depth_far_frac = float(getattr(opt, "awsrm_depth_far_frac", 0.0) or 0.0)
+                depth_weight_gamma = float(getattr(opt, "awsrm_depth_weight_gamma", 0.0) or 0.0)
+                depth_protect_frac = float(getattr(opt, "awsrm_depth_protect_frac", 0.0) or 0.0)
+                depth_all = None
+                if opt.fw_densify and (depth_bins > 1 or depth_weight_gamma != 0.0 or depth_protect_frac > 0.0):
+                    if hasattr(gaussians, "fw_depth_accum") and gaussians.fw_depth_accum.numel() == gaussians.get_xyz.shape[0]:
+                        depth_all = gaussians.fw_depth_accum.squeeze()
+                        if depth_all.numel() == 0 or depth_all.max() <= 0:
+                            depth_all = _compute_view_depths(viewpoint_cam, gaussians.get_xyz)
+                    else:
+                        depth_all = _compute_view_depths(viewpoint_cam, gaussians.get_xyz)
                 scale_max = gaussians.get_scaling.max(dim=1).values
                 clone_mask = scale_max <= gaussians.percent_dense * scene.cameras_extent
                 split_mask = scale_max > gaussians.percent_dense * scene.cameras_extent
@@ -357,6 +472,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 valid_split = torch.logical_and(denom_valid, torch.logical_and(var_norm > 0, split_mask))
                 valid_clone_norm = mean_norm[valid_clone]
                 valid_split_norm = var_norm[valid_split]
+                use_depth_strat = opt.fw_densify and depth_bins > 1 and depth_all is not None
 
                 if iteration % 100 == 0:
                     num_pts = int(gaussians.get_xyz.shape[0])
@@ -498,20 +614,36 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             clone_vals = mean_norm[valid_clone_idx]
                             k_clone = min(used_topk_clone, clone_vals.numel())
                             if k_clone > 0:
-                                topk_sub_idx = torch.topk(clone_vals, k_clone, largest=True, sorted=True).indices
-                                topk_idx = valid_clone_idx[topk_sub_idx]
-                                sel_mask_clone = torch.zeros(num_pts, device=mean_norm.device, dtype=torch.bool)
-                                sel_mask_clone[topk_idx] = True
+                                if use_depth_strat:
+                                    clone_depths = depth_all[valid_clone_idx]
+                                    topk_sub_idx = _depth_stratified_topk(
+                                        clone_vals, clone_depths, k_clone,
+                                        num_bins=depth_bins, far_min_frac=depth_far_frac
+                                    )
+                                else:
+                                    topk_sub_idx = torch.topk(clone_vals, k_clone, largest=True, sorted=True).indices
+                                if topk_sub_idx.numel() > 0:
+                                    topk_idx = valid_clone_idx[topk_sub_idx]
+                                    sel_mask_clone = torch.zeros(num_pts, device=mean_norm.device, dtype=torch.bool)
+                                    sel_mask_clone[topk_idx] = True
                     if used_topk_split > 0 and split_values.numel() > 0:
                         valid_split_idx = torch.nonzero(valid_split, as_tuple=False).squeeze(-1)
                         if valid_split_idx.numel() > 0:
                             split_vals = var_norm[valid_split_idx]
                             k_split = min(used_topk_split, split_vals.numel())
                             if k_split > 0:
-                                topk_sub_idx = torch.topk(split_vals, k_split, largest=True, sorted=True).indices
-                                topk_idx = valid_split_idx[topk_sub_idx]
-                                sel_mask_split = torch.zeros(num_pts, device=var_norm.device, dtype=torch.bool)
-                                sel_mask_split[topk_idx] = True
+                                if use_depth_strat:
+                                    split_depths = depth_all[valid_split_idx]
+                                    topk_sub_idx = _depth_stratified_topk(
+                                        split_vals, split_depths, k_split,
+                                        num_bins=depth_bins, far_min_frac=depth_far_frac
+                                    )
+                                else:
+                                    topk_sub_idx = torch.topk(split_vals, k_split, largest=True, sorted=True).indices
+                                if topk_sub_idx.numel() > 0:
+                                    topk_idx = valid_split_idx[topk_sub_idx]
+                                    sel_mask_split = torch.zeros(num_pts, device=var_norm.device, dtype=torch.bool)
+                                    sel_mask_split[topk_idx] = True
 
                     last_eff_threshold_clone = thr_clone
                     last_eff_threshold_split = thr_split
@@ -519,6 +651,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     last_eff_pct_split = eff_pct if used_topk_split == 0 else 0.0
                     last_eff_topk_clone = used_topk_clone
                     last_eff_topk_split = used_topk_split
+                    protected_mask = None
+                    if opt.fw_densify and depth_protect_frac > 0.0 and depth_all is not None and depth_bins > 1:
+                        depth_ref = depth_all[denom_valid] if denom_valid.any() else depth_all
+                        if depth_ref.numel() > 0:
+                            quantiles = torch.quantile(
+                                depth_ref,
+                                torch.linspace(0, 1, depth_bins + 1, device=depth_ref.device, dtype=depth_ref.dtype)[1:-1],
+                            )
+                            bin_all = torch.bucketize(depth_all, quantiles)
+                            far_mask = torch.logical_and(
+                                denom_valid, bin_all >= max(0, depth_bins - 2)
+                            )
+                            if far_mask.any():
+                                scores_far = mean_norm[far_mask]
+                                k_protect = max(1, int(math.ceil(scores_far.numel() * depth_protect_frac)))
+                                thr_far = torch.topk(scores_far, k_protect, largest=True, sorted=True).values[-1]
+                                protected_mask = torch.logical_and(far_mask, mean_norm >= thr_far)
                     if opt.fw_densify:
                         fw_mean_grads = mean_grads
                         fw_var_grads = var_grads
@@ -533,24 +682,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             max_grad_split=thr_split,
                             selected_mask_clone=sel_mask_clone,
                             selected_mask_split=sel_mask_split,
+                            protected_mask=protected_mask,
                             opacity_correction=True,
                             max_primitives=opt.awsrm_max_primitives,
                         )
                     else:
                         stats = gaussians.densify_and_prune(base_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
 
-                    if stats is not None:
-                        net = stats["after"] - stats["before"]
-                        msg = (
-                            f"[ITER {iteration}] densify added_clone={stats['added_clone']} "
-                            f"added_split={stats['added_split']} pruned={stats['pruned']} "
-                            f"net={net} points={stats['after']}"
-                        )
-                        _log_iter_stats(progress_bar, iter_log_path, msg)
                     if opt.fw_densify:
                         gaussians.fw_mean_accum.zero_()
                         gaussians.fw_var_accum.zero_()
                         gaussians.fw_denom.zero_()
+                        if hasattr(gaussians, "fw_depth_accum"):
+                            gaussians.fw_depth_accum.zero_()
                 
                 if not opt.fw_densify:
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):

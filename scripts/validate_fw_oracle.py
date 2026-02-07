@@ -118,8 +118,15 @@ def _adjoint_phi(image, gt_image, error_type):
     return diff.sum(dim=0, keepdim=True)
 
 
-def _adjoint_scores(view, gaussians, pipe, background, image, gt_image, use_trained_exp=False, error_type="grad"):
+def _adjoint_scores(view, gaussians, pipe, background, image, gt_image, use_trained_exp=False, error_type="grad", depth_map=None, depth_weight_gamma=0.0):
     phi = _adjoint_phi(image, gt_image, error_type)
+    if depth_map is not None and depth_weight_gamma != 0.0:
+        depth = 1.0 / (depth_map.detach().clamp_min(1e-6))
+        depth_valid = depth[depth > 0]
+        if depth_valid.numel() > 0:
+            depth_median = depth_valid.median()
+            depth_weight = (depth / (depth_median + 1e-6)).pow(depth_weight_gamma).clamp(0.25, 4.0)
+            phi = phi * depth_weight
     w0 = torch.ones_like(phi)
     w1 = phi
 
@@ -157,11 +164,21 @@ def compute_scores(view, gaussians, pipe, opt, background):
         pass
     loss.backward()
 
-    M, Z = _adjoint_scores(view, gaussians, pipe, background, image, gt_image, use_trained_exp=False, error_type=error_type)
+    M, Z = _adjoint_scores(
+        view, gaussians, pipe, background, image, gt_image,
+        use_trained_exp=False, error_type=error_type,
+        depth_map=render_pkg.get("depth"),
+        depth_weight_gamma=float(getattr(opt, "awsrm_depth_weight_gamma", 0.0) or 0.0),
+    )
     eps = float(getattr(opt, "awsrm_eps", 1e-6))
     mu_raw = M / (Z + eps)
-    severity_eta = 0.5
-    mu = mu_raw * (Z + eps).pow(1.0 - severity_eta)
+    severity_eta = float(getattr(opt, "awsrm_severity_eta", 0.5))
+    denom_scale = Z + eps
+    if denom_scale.numel() > 0:
+        median_denom = denom_scale[denom_scale > 0].median() if (denom_scale > 0).any() else denom_scale.median()
+        lambda_denom = max(eps, float(median_denom) * 0.1)
+        denom_scale = denom_scale + lambda_denom
+    mu = mu_raw * denom_scale.pow(1.0 - severity_eta)
     mean2d_score = torch.norm(render_pkg["viewspace_points"].grad[:, :2], dim=-1)
 
     feat_dc = gaussians._features_dc.grad

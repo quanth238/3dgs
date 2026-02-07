@@ -9,7 +9,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-3}"
 export CUDA_VISIBLE_DEVICES
 DATA_DEVICE="${DATA_DEVICE:-cuda}"
 DENSIFY_TOPK_RATIO="${DENSIFY_TOPK_RATIO:-0.05}"
-DENSIFY_UNTIL_ITER="${DENSIFY_UNTIL_ITER:-27000}"
+DENSIFY_UNTIL_ITER="${DENSIFY_UNTIL_ITER:-20000}"
 DENSIFY_FROM_ITER="${DENSIFY_FROM_ITER:-500}"
 DENSIFY_INTERVAL="${DENSIFY_INTERVAL:-100}"
 AWSRM_COLLECT_EVERY="${AWSRM_COLLECT_EVERY:-32}"
@@ -18,6 +18,11 @@ AWSRM_MAX_PRIMITIVES="${AWSRM_MAX_PRIMITIVES:-6300000}"
 AWSRM_USE_MOMENTS="${AWSRM_USE_MOMENTS:-1}"
 AWSRM_CLONE_FRAC="${AWSRM_CLONE_FRAC:-0.5}"
 AWSRM_SPLIT_FRAC="${AWSRM_SPLIT_FRAC:-0.5}"
+AWSRM_SEVERITY_ETA="${AWSRM_SEVERITY_ETA:-0.5}"
+AWSRM_DEPTH_BINS="${AWSRM_DEPTH_BINS:-4}"
+AWSRM_DEPTH_FAR_FRAC="${AWSRM_DEPTH_FAR_FRAC:-0.4}"
+AWSRM_DEPTH_WEIGHT_GAMMA="${AWSRM_DEPTH_WEIGHT_GAMMA:-0.0}"
+AWSRM_DEPTH_PROTECT_FRAC="${AWSRM_DEPTH_PROTECT_FRAC:-0.2}"
 FORCE_BASELINE="${FORCE_BASELINE:-0}"
 RUN_VALIDATE_ONLY="${RUN_VALIDATE_ONLY:-0}"
 RUN_MINIMAL="${RUN_MINIMAL:-1}"
@@ -30,7 +35,7 @@ ORACLE_CANDIDATES="${ORACLE_CANDIDATES:-100}"
 ORACLE_TOPK="${ORACLE_TOPK:-20}"
 ORACLE_STEPS="${ORACLE_STEPS:-10}"
 BUDGET_ITERS="${BUDGET_ITERS:-7000 30000}"
-BUDGET_MAX_VIEWS="${BUDGET_MAX_VIEWS:-10}"
+BUDGET_MAX_VIEWS="${BUDGET_MAX_VIEWS:-}"
 
 RASTER_ORIG="submodules/diff-gaussian-rasterization-3dgs"
 RASTER_FW="submodules/diff-gaussian-rasterization"
@@ -129,7 +134,12 @@ if [[ "${RUN_VALIDATE_ONLY}" != "1" ]]; then
     --awsrm_max_primitives "${AWSRM_MAX_PRIMITIVES}" \
     --awsrm_use_moments "${AWSRM_USE_MOMENTS}" \
     --awsrm_clone_frac "${AWSRM_CLONE_FRAC}" \
-    --awsrm_split_frac "${AWSRM_SPLIT_FRAC}"
+    --awsrm_split_frac "${AWSRM_SPLIT_FRAC}" \
+    --awsrm_severity_eta "${AWSRM_SEVERITY_ETA}" \
+    --awsrm_depth_bins "${AWSRM_DEPTH_BINS}" \
+    --awsrm_depth_far_frac "${AWSRM_DEPTH_FAR_FRAC}" \
+    --awsrm_depth_weight_gamma "${AWSRM_DEPTH_WEIGHT_GAMMA}" \
+    --awsrm_depth_protect_frac "${AWSRM_DEPTH_PROTECT_FRAC}"
 else
   echo "==> Skip FW training (RUN_VALIDATE_ONLY=1)"
 fi
@@ -175,10 +185,14 @@ fi
 
 if [[ "${RUN_BUDGET}" == "1" ]]; then
   echo "==> Budget-quality curves"
-  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/collect_budget_curve.py -s "${SRC}" -i "${IMAGES}" -m "${BASELINE_OUT}" --iterations ${BUDGET_ITERS} \
-    --max_views "${BUDGET_MAX_VIEWS}" --out "${BASELINE_OUT}/budget_curve.json" --depths "" --data_device "${DATA_DEVICE}"
-  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python scripts/collect_budget_curve.py -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" --iterations ${BUDGET_ITERS} \
-    --max_views "${BUDGET_MAX_VIEWS}" --out "${FW_OUT}/budget_curve.json" --depths "" --data_device "${DATA_DEVICE}"
+  BASE_BUDGET_CMD=(python scripts/collect_budget_curve.py -s "${SRC}" -i "${IMAGES}" -m "${BASELINE_OUT}" --iterations ${BUDGET_ITERS} --out "${BASELINE_OUT}/budget_curve.json" --depths "" --data_device "${DATA_DEVICE}")
+  FW_BUDGET_CMD=(python scripts/collect_budget_curve.py -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" --iterations ${BUDGET_ITERS} --out "${FW_OUT}/budget_curve.json" --depths "" --data_device "${DATA_DEVICE}")
+  if [[ -n "${BUDGET_MAX_VIEWS}" ]]; then
+    BASE_BUDGET_CMD+=(--max_views "${BUDGET_MAX_VIEWS}")
+    FW_BUDGET_CMD+=(--max_views "${BUDGET_MAX_VIEWS}")
+  fi
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${BASE_BUDGET_CMD[@]}"
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${FW_BUDGET_CMD[@]}"
 fi
 
 echo "Done."
