@@ -109,6 +109,7 @@ class OptimizationParams(ParamGroup):
         self.awsrm_K_split = 0
         self.awsrm_clone_frac = 0.0
         self.awsrm_split_frac = 0.0
+        self.awsrm_eps = 1e-6
         self.depth_l1_weight_init = 1.0
         self.depth_l1_weight_final = 0.01
         self.random_background = False

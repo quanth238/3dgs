@@ -630,13 +630,27 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
 
-    def add_fw_stats(self, fw_mean, fw_var, fw_denom, update_filter):
+    def add_fw_stats(self, fw_mean, fw_var, fw_denom, update_filter, mode="sum"):
         if fw_mean.dim() == 1:
             fw_mean = fw_mean.unsqueeze(-1)
         if fw_var.dim() == 1:
             fw_var = fw_var.unsqueeze(-1)
-        if fw_denom.dim() == 1:
+        if fw_denom is not None and fw_denom.dim() == 1:
             fw_denom = fw_denom.unsqueeze(-1)
-        self.fw_mean_accum[update_filter] += fw_mean[update_filter]
-        self.fw_var_accum[update_filter] += fw_var[update_filter]
-        self.fw_denom[update_filter] += fw_denom[update_filter]
+        if mode == "max":
+            self.fw_mean_accum[update_filter] = torch.maximum(
+                self.fw_mean_accum[update_filter], fw_mean[update_filter]
+            )
+            self.fw_var_accum[update_filter] = torch.maximum(
+                self.fw_var_accum[update_filter], fw_var[update_filter]
+            )
+            if fw_denom is not None:
+                self.fw_denom[update_filter] = torch.maximum(
+                    self.fw_denom[update_filter], fw_denom[update_filter]
+                )
+        else:
+            if fw_denom is None:
+                raise ValueError("fw_denom must be provided for sum accumulation")
+            self.fw_mean_accum[update_filter] += fw_mean[update_filter]
+            self.fw_var_accum[update_filter] += fw_var[update_filter]
+            self.fw_denom[update_filter] += fw_denom[update_filter]

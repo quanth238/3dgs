@@ -8,20 +8,16 @@ ITERATIONS="${ITERATIONS:-30000}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-3}"
 export CUDA_VISIBLE_DEVICES
 DATA_DEVICE="${DATA_DEVICE:-cuda}"
-DENSIFY_GRAD_PERCENTILE="${DENSIFY_GRAD_PERCENTILE:-0.0}"
-DENSIFY_TOPK="${DENSIFY_TOPK:-0}"
 DENSIFY_TOPK_RATIO="${DENSIFY_TOPK_RATIO:-0.05}"
 DENSIFY_UNTIL_ITER="${DENSIFY_UNTIL_ITER:-27000}"
 DENSIFY_FROM_ITER="${DENSIFY_FROM_ITER:-500}"
 DENSIFY_INTERVAL="${DENSIFY_INTERVAL:-100}"
-AWSRM_COLLECT_EVERY="${AWSRM_COLLECT_EVERY:-0}"
-AWSRM_ERROR_TYPE="${AWSRM_ERROR_TYPE:-l1}"
+AWSRM_COLLECT_EVERY="${AWSRM_COLLECT_EVERY:-32}"
+AWSRM_ERROR_TYPE="${AWSRM_ERROR_TYPE:-dssim}"
 AWSRM_MAX_PRIMITIVES="${AWSRM_MAX_PRIMITIVES:-6300000}"
 AWSRM_USE_MOMENTS="${AWSRM_USE_MOMENTS:-1}"
-AWSRM_K_CLONE="${AWSRM_K_CLONE:-0}"
-AWSRM_K_SPLIT="${AWSRM_K_SPLIT:-0}"
-AWSRM_CLONE_FRAC="${AWSRM_CLONE_FRAC:-0.0}"
-AWSRM_SPLIT_FRAC="${AWSRM_SPLIT_FRAC:-0.0}"
+AWSRM_CLONE_FRAC="${AWSRM_CLONE_FRAC:-0.5}"
+AWSRM_SPLIT_FRAC="${AWSRM_SPLIT_FRAC:-0.5}"
 FORCE_BASELINE="${FORCE_BASELINE:-0}"
 RUN_VALIDATE_ONLY="${RUN_VALIDATE_ONLY:-0}"
 RUN_MINIMAL="${RUN_MINIMAL:-1}"
@@ -37,6 +33,7 @@ BUDGET_ITERS="${BUDGET_ITERS:-7000 30000}"
 BUDGET_MAX_VIEWS="${BUDGET_MAX_VIEWS:-10}"
 
 RASTER_ORIG="submodules/diff-gaussian-rasterization-3dgs"
+RASTER_FW="submodules/diff-gaussian-rasterization"
 
 # SCENES=(bicycle flowers garden stump treehill room counter kitchen bonsai)
 SCENES=(bicycle)
@@ -66,6 +63,10 @@ fi
 NEED_ORIG_INSTALL=0
 if [[ "${NEED_BASELINE_TRAIN}" == "1" || "${NEED_BASELINE_RENDER}" == "1" || "${RUN_VALIDATE_ONLY}" == "1" ]]; then
   NEED_ORIG_INSTALL=1
+fi
+NEED_FW_INSTALL=0
+if [[ "${RUN_VALIDATE_ONLY}" != "1" || "${RUN_MINIMAL}" == "1" || "${RUN_ORACLE}" == "1" || "${RUN_ABLATION}" == "1" || "${RUN_PROFILE}" == "1" || "${RUN_BUDGET}" == "1" ]]; then
+  NEED_FW_INSTALL=1
 fi
 
 echo "Picked random scene: ${SCENE}"
@@ -98,6 +99,12 @@ else
   echo "==> Skip baseline render (found ${BASELINE_RENDER_DIR})"
 fi
 
+if [[ "${NEED_FW_INSTALL}" == "1" ]]; then
+  echo "==> Install FW rasterizer (adjoint score)"
+  pip uninstall -y diff-gaussian-rasterization >/dev/null 2>&1 || true
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" pip install -e "${RASTER_FW}" --no-build-isolation
+fi
+
 if [[ "${RUN_VALIDATE_ONLY}" == "1" && ! -f "${FW_PLY}" ]]; then
   echo "ERROR: RUN_VALIDATE_ONLY=1 but FW model not found at ${FW_PLY}"
   exit 1
@@ -114,16 +121,13 @@ if [[ "${RUN_VALIDATE_ONLY}" != "1" ]]; then
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python train.py -s "${SRC}" -i "${IMAGES}" -m "${FW_OUT}" \
     --disable_viewer --quiet --eval --iterations "${ITERATIONS}" --data_device "${DATA_DEVICE}" \
     --densify_from_iter "${DENSIFY_FROM_ITER}" --densification_interval "${DENSIFY_INTERVAL}" \
-    --densify_grad_percentile "${DENSIFY_GRAD_PERCENTILE}" \
-    --densify_topk "${DENSIFY_TOPK}" --densify_topk_ratio "${DENSIFY_TOPK_RATIO}" \
+    --densify_topk_ratio "${DENSIFY_TOPK_RATIO}" \
     --densify_until_iter "${DENSIFY_UNTIL_ITER}" \
     --fw_densify \
     --awsrm_collect_every "${AWSRM_COLLECT_EVERY}" \
     --awsrm_error_type "${AWSRM_ERROR_TYPE}" \
     --awsrm_max_primitives "${AWSRM_MAX_PRIMITIVES}" \
     --awsrm_use_moments "${AWSRM_USE_MOMENTS}" \
-    --awsrm_K_clone "${AWSRM_K_CLONE}" \
-    --awsrm_K_split "${AWSRM_K_SPLIT}" \
     --awsrm_clone_frac "${AWSRM_CLONE_FRAC}" \
     --awsrm_split_frac "${AWSRM_SPLIT_FRAC}"
 else

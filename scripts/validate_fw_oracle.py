@@ -122,7 +122,6 @@ def _adjoint_scores(view, gaussians, pipe, background, image, gt_image, use_trai
     phi = _adjoint_phi(image, gt_image, error_type)
     w0 = torch.ones_like(phi)
     w1 = phi
-    w2 = phi * phi
 
     with torch.enable_grad():
         aux = torch.ones((gaussians.get_xyz.shape[0], 3), device="cuda", requires_grad=True)
@@ -130,13 +129,12 @@ def _adjoint_scores(view, gaussians, pipe, background, image, gt_image, use_trai
         aux_img = aux_pkg["render"]
         if view.alpha_mask is not None:
             aux_img = aux_img * view.alpha_mask.cuda()
-        loss = (aux_img[0] * w0 + aux_img[1] * w1 + aux_img[2] * w2).sum()
+        loss = (aux_img[0] * w0 + aux_img[1] * w1).sum()
         grad = torch.autograd.grad(loss, aux, retain_graph=False, create_graph=False, allow_unused=False)[0]
 
-    Z = grad[:, 0].clamp_min(0.0)
-    M = grad[:, 1].clamp_min(0.0)
-    Q = grad[:, 2].clamp_min(0.0)
-    return M, Q, Z
+    Z = grad[:, 0]
+    M = grad[:, 1]
+    return M, Z
 
 
 def compute_scores(view, gaussians, pipe, opt, background):
@@ -159,7 +157,11 @@ def compute_scores(view, gaussians, pipe, opt, background):
         pass
     loss.backward()
 
-    M, Q, Z = _adjoint_scores(view, gaussians, pipe, background, image, gt_image, use_trained_exp=use_trained_exp, error_type=error_type)
+    M, Z = _adjoint_scores(view, gaussians, pipe, background, image, gt_image, use_trained_exp=False, error_type=error_type)
+    eps = float(getattr(opt, "awsrm_eps", 1e-6))
+    mu_raw = M / (Z + eps)
+    severity_eta = 0.5
+    mu = mu_raw * (Z + eps).pow(1.0 - severity_eta)
     mean2d_score = torch.norm(render_pkg["viewspace_points"].grad[:, :2], dim=-1)
 
     feat_dc = gaussians._features_dc.grad
@@ -169,8 +171,8 @@ def compute_scores(view, gaussians, pipe, opt, background):
     return {
         "render_pkg": render_pkg,
         "loss": float(loss.item()),
-        "adjoint_score": M,
-        "split_score": (Q - (M * M) / (Z.clamp_min(1e-8))).clamp_min(0.0) * render_pkg["radii"].clamp_min(1.0),
+        "adjoint_score": mu,
+        "split_score": render_pkg["viewspace_points"].grad[:, :2].abs().sum(dim=-1) * render_pkg["radii"].clamp_min(1.0),
         "mean2d_score": mean2d_score,
         "feat_grad": feat_grad,
     }

@@ -60,7 +60,6 @@ def _adjoint_scores(view, gaussians, pipe, background, image, gt_image, use_trai
     phi = _adjoint_phi(image, gt_image, error_type)
     w0 = torch.ones_like(phi)
     w1 = phi
-    w2 = phi * phi
 
     with torch.enable_grad():
         aux = torch.ones((gaussians.get_xyz.shape[0], 3), device="cuda", requires_grad=True)
@@ -68,13 +67,12 @@ def _adjoint_scores(view, gaussians, pipe, background, image, gt_image, use_trai
         aux_img = aux_pkg["render"]
         if view.alpha_mask is not None:
             aux_img = aux_img * view.alpha_mask.cuda()
-        loss = (aux_img[0] * w0 + aux_img[1] * w1 + aux_img[2] * w2).sum()
+        loss = (aux_img[0] * w0 + aux_img[1] * w1).sum()
         grad = torch.autograd.grad(loss, aux, retain_graph=False, create_graph=False, allow_unused=False)[0]
 
-    Z = grad[:, 0].clamp_min(0.0)
-    M = grad[:, 1].clamp_min(0.0)
-    Q = grad[:, 2].clamp_min(0.0)
-    return M, Q, Z
+    Z = grad[:, 0]
+    M = grad[:, 1]
+    return M, Z
 
 
 def compute_adjoint_score_for_view(view, gaussians, pipe, opt, background):
@@ -98,9 +96,9 @@ def compute_adjoint_score_for_view(view, gaussians, pipe, opt, background):
     loss.backward()
 
     residual_img = (image.detach() - gt_image).abs()
-    M, Q, Z = _adjoint_scores(view, gaussians, pipe, background, image, gt_image, use_trained_exp=use_trained_exp, error_type=error_type)
+    M, Z = _adjoint_scores(view, gaussians, pipe, background, image, gt_image, use_trained_exp=False, error_type=error_type)
 
-    return render_pkg, image.detach(), residual_img, M, Q, Z
+    return render_pkg, image.detach(), residual_img, M, Z
 
 
 def _default_args():
@@ -139,14 +137,16 @@ def _ensure_depths_available(dataset):
 
 def score_heatmap_sanity(scene, pipe, opt, background, topk, out_dir):
     view = random.choice(scene.getTrainCameras())
-    render_pkg, image, residual, M, Q, Z = compute_adjoint_score_for_view(view, scene.gaussians, pipe, opt, background)
+    render_pkg, image, residual, M, Z = compute_adjoint_score_for_view(view, scene.gaussians, pipe, opt, background)
 
     scale_max = scene.gaussians.get_scaling.max(dim=1).values
     clone_mask = scale_max <= scene.gaussians.percent_dense * scene.cameras_extent
     split_mask = scale_max > scene.gaussians.percent_dense * scene.cameras_extent
     eps = 1e-8
-    clone_score = M
-    split_score = (Q - (M * M) / (Z.clamp_min(eps))).clamp_min(0.0)
+    severity_eta = 0.5
+    mu_raw = M / (Z + eps)
+    clone_score = mu_raw * (Z + eps).pow(1.0 - severity_eta)
+    split_score = render_pkg["viewspace_points"].grad[:, :2].abs().sum(dim=-1)
     split_score = split_score * render_pkg["radii"].clamp_min(1.0)
     combined_score = torch.where(clone_mask, clone_score, split_score)
 
@@ -194,14 +194,19 @@ def topk_stability(scene, pipe, opt, background, topk):
     if len(views) < 2:
         return {"topk_overlap": 0.0}
     v1, v2 = random.sample(views, 2)
-    render1, _, _, M1, Q1, Z1 = compute_adjoint_score_for_view(v1, scene.gaussians, pipe, opt, background)
-    render2, _, _, M2, Q2, Z2 = compute_adjoint_score_for_view(v2, scene.gaussians, pipe, opt, background)
+    render1, _, _, M1, Z1 = compute_adjoint_score_for_view(v1, scene.gaussians, pipe, opt, background)
+    render2, _, _, M2, Z2 = compute_adjoint_score_for_view(v2, scene.gaussians, pipe, opt, background)
     scale_max = scene.gaussians.get_scaling.max(dim=1).values
     clone_mask = scale_max <= scene.gaussians.percent_dense * scene.cameras_extent
     split_mask = scale_max > scene.gaussians.percent_dense * scene.cameras_extent
     eps = 1e-8
-    score1 = torch.where(clone_mask, M1, (Q1 - (M1 * M1) / (Z1.clamp_min(eps))).clamp_min(0.0) * render1["radii"].clamp_min(1.0))
-    score2 = torch.where(clone_mask, M2, (Q2 - (M2 * M2) / (Z2.clamp_min(eps))).clamp_min(0.0) * render2["radii"].clamp_min(1.0))
+    severity_eta = 0.5
+    mu1 = (M1 / (Z1 + eps)) * (Z1 + eps).pow(1.0 - severity_eta)
+    mu2 = (M2 / (Z2 + eps)) * (Z2 + eps).pow(1.0 - severity_eta)
+    split1 = render1["viewspace_points"].grad[:, :2].abs().sum(dim=-1) * render1["radii"].clamp_min(1.0)
+    split2 = render2["viewspace_points"].grad[:, :2].abs().sum(dim=-1) * render2["radii"].clamp_min(1.0)
+    score1 = torch.where(clone_mask, mu1, split1)
+    score2 = torch.where(clone_mask, mu2, split2)
     topk = min(topk, score1.numel(), score2.numel())
     idx1 = set(torch.topk(score1, k=topk).indices.tolist())
     idx2 = set(torch.topk(score2, k=topk).indices.tolist())
@@ -258,18 +263,19 @@ def densify_effect_test(dataset, pipe, opt, background, steps, use_fw):
                 render_pkg["radii"][render_pkg["visibility_filter"]]
             )
             if use_fw:
-                fw_M, fw_Q, fw_Z = _adjoint_scores(viewpoint_cam, gaussians, pipe, background, image, gt_image)
-                gaussians.add_fw_stats(fw_M, fw_Q, fw_Z, render_pkg["visibility_filter"])
-                M = gaussians.fw_mean_accum
-                Q = gaussians.fw_var_accum
-                Z = gaussians.fw_denom
-                mean_scores = M.squeeze().abs()
-                var_scores = (Q - (M * M) / (Z.clamp_min(1e-8))).squeeze().clamp_min(0.0)
+                fw_M, fw_Z = _adjoint_scores(viewpoint_cam, gaussians, pipe, background, image, gt_image)
+                eps = 1e-8
+                mu_view = fw_M / (fw_Z + eps)
+                split_view = render_pkg["viewspace_points"].grad[:, :2].abs().sum(dim=-1, keepdim=True)
+                gaussians.add_fw_stats(mu_view, split_view, fw_Z, render_pkg["visibility_filter"], mode="max")
+                mean_scores = gaussians.fw_mean_accum.squeeze().abs()
+                severity_eta = 0.5
+                denom_scale = fw_Z.squeeze().clamp_min(1e-6)
+                mean_scores = mean_scores * denom_scale.pow(1.0 - severity_eta)
+                var_scores = gaussians.fw_var_accum.squeeze().clamp_min(0.0)
                 var_scores = var_scores * gaussians.max_radii2D.clamp_min(1.0)
                 fw_mean_grads = mean_scores.unsqueeze(-1)
                 fw_var_grads = var_scores.unsqueeze(-1)
-                fw_mean_grads = mean_scores
-                fw_var_grads = var_scores
                 scale_max = gaussians.get_scaling.max(dim=1).values
                 clone_mask = scale_max <= gaussians.percent_dense * scene.cameras_extent
                 split_mask = scale_max > gaussians.percent_dense * scene.cameras_extent
@@ -277,12 +283,20 @@ def densify_effect_test(dataset, pipe, opt, background, steps, use_fw):
                 var_valid = var_scores[split_mask]
                 topk = int(getattr(opt, "densify_topk", 0) or 0)
                 topk_ratio = float(getattr(opt, "densify_topk_ratio", 0.0) or 0.0)
-                if topk_ratio > 0.0:
-                    topk_clone = max(1, int(mean_valid.numel() * topk_ratio)) if mean_valid.numel() > 0 else 0
-                    topk_split = max(1, int(var_valid.numel() * topk_ratio)) if var_valid.numel() > 0 else 0
+                num_pts = int(gaussians.get_xyz.shape[0])
+                if topk > 0:
+                    k_new = topk
+                elif topk_ratio > 0.0:
+                    k_new = int(num_pts * topk_ratio)
                 else:
-                    topk_clone = topk
-                    topk_split = topk
+                    k_new = 0
+                if k_new > 0:
+                    clone_share = 0.5
+                    topk_clone = int(k_new * clone_share)
+                    topk_split = max(0, k_new - topk_clone)
+                else:
+                    topk_clone = 0
+                    topk_split = 0
                 thr_clone = opt.densify_grad_threshold
                 thr_split = opt.densify_grad_threshold
                 if topk_clone > 0 and mean_valid.numel() > 0:

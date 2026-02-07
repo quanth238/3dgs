@@ -79,7 +79,7 @@ def _adjoint_phi(image, gt_image, error_type):
     return diff.sum(dim=0, keepdim=True)
 
 
-def _adjoint_score(view, gaussians, pipe, background, image, gt_image, use_trained_exp=False, error_type="grad"):
+def _adjoint_score(view, gaussians, pipe, background, image, gt_image, use_trained_exp=False, error_type="grad", eps=1e-6):
     phi = _adjoint_phi(image, gt_image, error_type)
     w0 = torch.ones_like(phi)
     w1 = phi
@@ -93,7 +93,9 @@ def _adjoint_score(view, gaussians, pipe, background, image, gt_image, use_train
         loss = (aux_img[0] * w0 + aux_img[1] * w1).sum()
         grad = torch.autograd.grad(loss, aux, retain_graph=False, create_graph=False, allow_unused=False)[0]
 
-    score = grad[:, 1].clamp_min(0.0)
+    mu_raw = grad[:, 1] / (grad[:, 0] + eps)
+    severity_eta = 0.5
+    score = mu_raw * (grad[:, 0] + eps).pow(1.0 - severity_eta)
     return score
 
 def _rankdata(x: torch.Tensor) -> torch.Tensor:
@@ -178,7 +180,8 @@ def main():
         loss.backward()
 
         error_type = getattr(opt_args, "awsrm_error_type", "grad")
-        fw_score = _adjoint_score(view, gaussians, pipe, background, image, gt_image, use_trained_exp=dataset.train_test_exp, error_type=error_type)
+        eps = float(getattr(opt_args, "awsrm_eps", 1e-6))
+        fw_score = _adjoint_score(view, gaussians, pipe, background, image, gt_image, use_trained_exp=False, error_type=error_type, eps=eps)
 
         feat_dc = gaussians._features_dc.grad
         feat_rest = gaussians._features_rest.grad

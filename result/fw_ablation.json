@@ -1,5 +1,5 @@
 {
-  "corr_clone_featgrad": 0.8671268224716187,
-  "corr_split_featgrad": 0.8178253769874573,
-  "corr_mean2d_featgrad": 0.7580865025520325
+  "corr_clone_featgrad": 0.3710179030895233,
+  "corr_split_featgrad": 0.4863746464252472,
+  "corr_mean2d_featgrad": 0.6728686094284058
 }

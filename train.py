@@ -106,7 +106,6 @@ def _adjoint_scores(viewpoint_cam, gaussians, pipe, image, gt_image, use_trained
     phi = _adjoint_phi(image, gt_image, error_type)
     w0 = torch.ones_like(phi)
     w1 = phi
-    w2 = phi * phi
 
     with torch.enable_grad():
         aux = torch.ones((gaussians.get_xyz.shape[0], 3), device="cuda", requires_grad=True)
@@ -121,13 +120,12 @@ def _adjoint_scores(viewpoint_cam, gaussians, pipe, image, gt_image, use_trained
         if viewpoint_cam.alpha_mask is not None:
             aux_img = aux_img * viewpoint_cam.alpha_mask.cuda()
 
-        loss = (aux_img[0] * w0 + aux_img[1] * w1 + aux_img[2] * w2).sum()
+        loss = (aux_img[0] * w0 + aux_img[1] * w1).sum()
         grad = torch.autograd.grad(loss, aux, retain_graph=False, create_graph=False, allow_unused=False)[0]
 
     Z = grad[:, 0]
     M = grad[:, 1]
-    Q = grad[:, 2]
-    return M, Q, Z, aux_pkg["visibility_filter"]
+    return M, Z, aux_pkg["visibility_filter"]
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
@@ -162,6 +160,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     viewpoint_indices = list(range(len(viewpoint_stack)))
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
+    last_l1_for_log = None
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     last_eff_threshold_clone = opt.densify_grad_threshold
@@ -271,10 +270,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             fw_denom = None
             fw_vis_filter = None
             if need_fw_stats:
-                fw_mean, fw_var, fw_denom, fw_vis_filter = _adjoint_scores(
+                fw_mean, fw_denom, fw_vis_filter = _adjoint_scores(
                     viewpoint_cam, gaussians, pipe, image, gt_image,
-                    use_trained_exp=dataset.train_test_exp, error_type=opt.awsrm_error_type
+                    use_trained_exp=False, error_type=opt.awsrm_error_type
                 )
+                # Use max-over-views aggregation on normalized moments (AW-SRM++).
+                eps = float(getattr(opt, "awsrm_eps", 1e-6))
+                mu_view = fw_mean / (fw_denom + eps)
+                if viewspace_point_tensor.grad is not None:
+                    split_view = viewspace_point_tensor.grad[:, :2].abs().sum(dim=-1, keepdim=True)
+                else:
+                    split_view = torch.zeros_like(mu_view)
+                update_filter = fw_vis_filter if fw_vis_filter is not None else visibility_filter
+                gaussians.add_fw_stats(mu_view, split_view, fw_denom, update_filter, mode="max")
 
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -296,23 +304,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 if opt.fw_densify:
-                    if need_fw_stats:
-                        update_filter = fw_vis_filter if fw_vis_filter is not None else visibility_filter
-                        gaussians.add_fw_stats(fw_mean, fw_var, fw_denom, update_filter)
+                    # fw stats are already updated inside need_fw_stats block (max aggregation).
+                    pass
                 else:
                     gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 awsrm_use_moments = bool(getattr(opt, "awsrm_use_moments", 1))
                 if opt.fw_densify:
                     Z = gaussians.fw_denom
-                    M = gaussians.fw_mean_accum
-                    Q = gaussians.fw_var_accum
-                    eps = 1e-8
-                    mean_scores = M
-                    var_scores = (Q - (M * M) / (Z.clamp_min(eps))).clamp_min(0.0)
-                    var_scores = var_scores * gaussians.max_radii2D.clamp_min(1.0).unsqueeze(-1)
+                    mean_scores = gaussians.fw_mean_accum
+                    var_scores = gaussians.fw_var_accum
+                    # If moments disabled, fall back to mean scores.
                     if not awsrm_use_moments:
                         var_scores = mean_scores
+                    # Optional size factor for split score.
+                    var_scores = var_scores * gaussians.max_radii2D.clamp_min(1.0).unsqueeze(-1)
                 else:
                     denom_raw = gaussians.denom
                     denom = denom_raw.clamp_min(1.0)
@@ -321,6 +327,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 mean_scores = mean_scores.squeeze()
                 var_scores = var_scores.squeeze()
+                if opt.fw_densify:
+                    severity_eta = 0.5
+                    denom_scale = gaussians.fw_denom.squeeze().clamp_min(float(getattr(opt, "awsrm_eps", 1e-6)))
+                    mean_scores = mean_scores * denom_scale.pow(1.0 - severity_eta)
                 mean_scores[mean_scores.isnan()] = 0.0
                 var_scores[var_scores.isnan()] = 0.0
                 if mean_scores.dim() == 1:
@@ -335,7 +345,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 else:
                     var_norm = torch.norm(var_scores, dim=-1)
                     var_grads = var_scores
-                denom_valid = gaussians.fw_denom.squeeze() > 0 if opt.fw_densify else (denom_raw.squeeze() > 0)
+                if opt.fw_densify:
+                    z_min = float(getattr(opt, "awsrm_eps", 1e-6))
+                    denom_valid = gaussians.fw_denom.squeeze() > z_min
+                else:
+                    denom_valid = denom_raw.squeeze() > 0
                 scale_max = gaussians.get_scaling.max(dim=1).values
                 clone_mask = scale_max <= gaussians.percent_dense * scene.cameras_extent
                 split_mask = scale_max > gaussians.percent_dense * scene.cameras_extent
@@ -344,19 +358,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 valid_clone_norm = mean_norm[valid_clone]
                 valid_split_norm = var_norm[valid_split]
 
-                if iteration % 200 == 0:
+                if iteration % 100 == 0:
                     num_pts = int(gaussians.get_xyz.shape[0])
                     mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
                     mem_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
-                    if valid_clone_norm.numel() > 0 and valid_split_norm.numel() > 0:
-                        valid_all = torch.cat([valid_clone_norm, valid_split_norm], dim=0)
-                    elif valid_clone_norm.numel() > 0:
-                        valid_all = valid_clone_norm
-                    else:
-                        valid_all = valid_split_norm
-                    p90 = float(torch.quantile(valid_all, 0.90).item()) if valid_all.numel() > 0 else 0.0
-                    p95 = float(torch.quantile(valid_all, 0.95).item()) if valid_all.numel() > 0 else 0.0
-                    p99 = float(torch.quantile(valid_all, 0.99).item()) if valid_all.numel() > 0 else 0.0
                     sel_clone = torch.logical_and(
                         mean_norm >= last_eff_threshold_clone,
                         clone_mask
@@ -371,18 +376,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     valid_split_count = int(valid_split_norm.numel())
                     valid_count = valid_clone_count + valid_split_count
                     valid_ratio = valid_count / max(1, num_pts)
-                    pct_clone_msg = f" pct_c={last_eff_pct_clone:.3f}" if last_eff_pct_clone > 0 else ""
-                    pct_split_msg = f" pct_s={last_eff_pct_split:.3f}" if last_eff_pct_split > 0 else ""
-                    topk_clone_msg = f" topk_c={last_eff_topk_clone}" if last_eff_topk_clone > 0 else ""
-                    topk_split_msg = f" topk_s={last_eff_topk_split}" if last_eff_topk_split > 0 else ""
+                    cur_l1 = float(Ll1.item())
+                    if last_l1_for_log is None:
+                        delta_l1 = 0.0
+                    else:
+                        delta_l1 = cur_l1 - last_l1_for_log
+                    last_l1_for_log = cur_l1
                     msg = (
                         f"[ITER {iteration}] points={num_pts} "
                         f"sel={sel_count} ({sel_ratio:.4f}) "
                         f"valid={valid_count} ({valid_ratio:.4f}) "
                         f"clone={int(sel_clone.sum().item())} split={int(sel_split.sum().item())} "
-                        f"thr_c={last_eff_threshold_clone:.6f}{pct_clone_msg}{topk_clone_msg} "
-                        f"thr_s={last_eff_threshold_split:.6f}{pct_split_msg}{topk_split_msg} "
-                        f"p90={p90:.6f} p95={p95:.6f} p99={p99:.6f} "
+                        f"thr_c={last_eff_threshold_clone:.6f} "
+                        f"thr_s={last_eff_threshold_split:.6f} "
+                        f"L1={cur_l1:.6f} dL1={delta_l1:+.6f} "
                         f"mem_alloc={mem_alloc:.2f}G mem_reserved={mem_reserved:.2f}G"
                     )
                     _log_iter_stats(progress_bar, iter_log_path, msg)
@@ -419,36 +426,53 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     clone_values = valid_clone_norm
                     split_values = valid_split_norm
 
-                    # Determine top-k budget for clone/split.
-                    topk_clone = awsrm_k_clone if awsrm_k_clone > 0 else eff_topk
-                    topk_split = awsrm_k_split if awsrm_k_split > 0 else eff_topk
-                    clone_frac = awsrm_clone_frac if awsrm_clone_frac > 0.0 else eff_topk_ratio
-                    split_frac = awsrm_split_frac if awsrm_split_frac > 0.0 else eff_topk_ratio
-                    if topk_clone <= 0 and clone_frac > 0.0:
-                        topk_clone = int(clone_values.numel() * clone_frac)
-                    if topk_split <= 0 and split_frac > 0.0:
-                        topk_split = int(split_values.numel() * split_frac)
-                    if clone_values.numel() > 0 and topk_clone == 0 and (awsrm_k_clone > 0 or clone_frac > 0.0):
-                        topk_clone = 1
-                    if split_values.numel() > 0 and topk_split == 0 and (awsrm_k_split > 0 or split_frac > 0.0):
-                        topk_split = 1
+                    # Determine per-step offspring budget (LMO-style).
+                    k_new = 0
+                    if eff_topk > 0:
+                        k_new = eff_topk
+                    elif eff_topk_ratio > 0.0:
+                        k_new = int(num_pts * eff_topk_ratio)
+
+                    # If explicit K_clone/K_split are provided, use them.
+                    topk_clone = awsrm_k_clone
+                    topk_split = awsrm_k_split
 
                     # Enforce budgeted LMO if max_primitives is set.
-                    pct_for_selection = eff_pct
+                    pct_for_selection = 0.0 if opt.fw_densify else eff_pct
                     force_no_densify = False
                     if use_budget:
                         pct_for_selection = 0.0
                         if budget_total <= 0:
+                            k_new = 0
+                        elif k_new > 0:
+                            k_new = min(k_new, budget_total)
+
+                    # If no explicit K_* provided, split k_new by fraction or fixed 50/50.
+                    if (topk_clone + topk_split) <= 0 and k_new > 0:
+                        if awsrm_clone_frac > 0.0 or awsrm_split_frac > 0.0:
+                            denom = awsrm_clone_frac + awsrm_split_frac
+                            clone_share = awsrm_clone_frac / denom if denom > 0 else 0.5
+                        else:
+                            clone_share = 0.5
+                        topk_clone = int(k_new * clone_share)
+                        topk_split = max(0, k_new - topk_clone)
+
+                    # If explicit K_* are provided but exceed k_new, scale down.
+                    if k_new > 0 and (topk_clone + topk_split) > k_new:
+                        total_req = topk_clone + topk_split
+                        scale = k_new / float(total_req)
+                        topk_clone = int(topk_clone * scale)
+                        topk_split = max(0, k_new - topk_clone)
+
+                    # If explicit K_* are provided, still respect global budget.
+                    if use_budget and (topk_clone + topk_split) > 0:
+                        if budget_total <= 0:
                             topk_clone = 0
                             topk_split = 0
-                            force_no_densify = True
-                        elif topk_clone == 0 and topk_split == 0:
-                            total_valid = clone_values.numel() + split_values.numel()
-                            if total_valid > 0:
-                                clone_share = clone_values.numel() / total_valid
-                            else:
-                                clone_share = 0.5
-                            topk_clone = int(budget_total * clone_share)
+                        elif (topk_clone + topk_split) > budget_total:
+                            total_req = topk_clone + topk_split
+                            scale = budget_total / float(total_req)
+                            topk_clone = int(topk_clone * scale)
                             topk_split = max(0, budget_total - topk_clone)
 
                     # Cap by available valid candidates.
@@ -457,23 +481,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if topk_split > split_values.numel():
                         topk_split = split_values.numel()
 
-                    # If budget_total is active, scale down to fit budget.
-                    if use_budget and budget_total > 0:
-                        total_req = topk_clone + topk_split
-                        if total_req > budget_total and total_req > 0:
-                            scale = budget_total / float(total_req)
-                            topk_clone = int(topk_clone * scale)
-                            topk_split = int(topk_split * scale)
-                        # Distribute remaining budget if any.
-                        remainder = budget_total - (topk_clone + topk_split)
-                        if remainder > 0:
-                            if clone_values.numel() - topk_clone >= split_values.numel() - topk_split:
-                                add_clone = min(remainder, max(0, clone_values.numel() - topk_clone))
-                                topk_clone += add_clone
-                                remainder -= add_clone
-                            if remainder > 0:
-                                add_split = min(remainder, max(0, split_values.numel() - topk_split))
-                                topk_split += add_split
+                    if topk_clone == 0 and topk_split == 0 and pct_for_selection == 0.0:
+                        force_no_densify = True
 
                     thr_clone, used_topk_clone = _compute_threshold(clone_values, topk_clone, pct_for_selection, base_threshold)
                     thr_split, used_topk_split = _compute_threshold(split_values, topk_split, pct_for_selection, base_threshold)
@@ -538,9 +547,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             f"net={net} points={stats['after']}"
                         )
                         _log_iter_stats(progress_bar, iter_log_path, msg)
+                    if opt.fw_densify:
+                        gaussians.fw_mean_accum.zero_()
+                        gaussians.fw_var_accum.zero_()
+                        gaussians.fw_denom.zero_()
                 
-                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    gaussians.reset_opacity()
+                if not opt.fw_densify:
+                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                        gaussians.reset_opacity()
 
             # Optimizer step
             if iteration < opt.iterations:
